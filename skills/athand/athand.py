@@ -158,6 +158,9 @@ _u32.SetWindowPos.argtypes = [
 _u32.SetWindowPos.restype = wt.BOOL
 WM_CLOSE = 0x0010
 SWP_NOSIZE, SWP_NOZORDER = 0x0001, 0x0004
+SW_MINIMIZE = 6
+_u32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+_u32.ShowWindow.restype = wt.BOOL
 
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
@@ -4003,6 +4006,8 @@ LABEL_CLICK_CHECK = "a click by label reaches the same button (label read by a n
 TYPE_CHECK = "type puts the characters in the control (read back from the control itself)"
 KEY_CHECK = "key presses land, and X replaces the Ctrl+A selection"
 SCROLL_CHECK = "scroll uses ScrollItemPattern"
+DOUBLECLICK_CHECK = "double-click presses twice (the app logged two clicks)"
+RESTORE_CHECK = "restore brings a minimized window back"
 DRAG_MOVE_CHECK = "drag --from titlebar moves the window by the shift it was given"
 DRAG_SELECT_CHECK = "drag carries a selection the app reports (EM_GETSEL)"
 CANVAS_CHECK = "targets reads a canvas UI off the picture"
@@ -4014,9 +4019,9 @@ SKIPPED_WITHOUT_A_LISTING = (
     TYPE_CHECK,
     KEY_CHECK,
     SCROLL_CHECK,
+    DOUBLECLICK_CHECK,
     DRAG_MOVE_CHECK,
     DRAG_SELECT_CHECK,
-    CANVAS_CHECK,
 )
 # Everything that goes through `_INJECTING_ACTIONS`, and so is refused before anything can
 # be measured when the input desktop is not this session's.
@@ -4027,6 +4032,8 @@ SKIPPED_WHILE_LOCKED = (
     TYPE_CHECK,
     KEY_CHECK,
     SCROLL_CHECK,
+    DOUBLECLICK_CHECK,
+    RESTORE_CHECK,
     DRAG_MOVE_CHECK,
     DRAG_SELECT_CHECK,
 )
@@ -4074,6 +4081,7 @@ _ENVIRONMENT_REFUSALS = (
     "could not raise the source window",
     "belongs to",
     "has no rectangle any more",
+    "DPI-unaware process",
 )
 
 
@@ -4120,6 +4128,13 @@ def _selftest(keep: bool = False) -> int:
         log = work / "target.jsonl"
 
         # ── read-only: the list, the pixels, the numbers ───────────────────
+        # Pre-flight: if something else minimized the probe — a person pressing Win+D does it to
+        # every window, measured twice on 2026-09-17 — every listing below would fail for a
+        # reason that is not the tool's. `restore` is the tool's own answer to that, so use it.
+        if window_state(hwnd) != "normal":
+            print(f"NOTE  the probe was {window_state(hwnd)}: restoring it first", flush=True)
+            _call("restore", "--hwnd", hwnd, data=data)
+            time.sleep(0.5)
         code, out = _call("windows", data=data)
         checks.check(
             "windows lists the probe by hwnd",
@@ -4148,6 +4163,46 @@ def _selftest(keep: bool = False) -> int:
         )
         frame = str(listing.get("frame") or "")
         checks.check("the listing's numbered frame exists", bool(frame) and _is_png(frame), frame)
+
+        # ── the third tier: a UI drawn in pixels ───────────────────────────
+        if importlib.util.find_spec("rapidocr_onnxruntime") is None:
+            checks.skip(CANVAS_CHECK, "rapidocr is not installed")
+        else:
+            canvas_log = work / "canvas.jsonl"
+            canvas = subprocess.Popen(
+                [sys.executable, _probe_script("canvas_probe2.py"), "--log", str(canvas_log)]
+            )
+            try:
+                code, out = _call("windows", "--include", "all", data=data)
+                match = re.search(r"hwnd=(\d+).*'athand canvas probe'", out)
+                if match is None:
+                    checks.check(
+                        CANVAS_CHECK,
+                        False,
+                        "the Tk probe did not show up in windows --include all",
+                    )
+                else:
+                    canvas_hwnd = int(match.group(1))
+                    code, out = _call("targets", "--hwnd", canvas_hwnd, data=data)
+                    record = _read_json(_listing_path(canvas_hwnd))
+                    visual = [
+                        item
+                        for item in record.get("targets") or []
+                        if item.get("source") == "visual"
+                    ]
+                    reason = _environment_refusal(out) if code != 0 else ""
+                    if reason:
+                        checks.skip(CANVAS_CHECK, f"the desktop refused the capture ({reason})")
+                    else:
+                        checks.check(
+                            CANVAS_CHECK,
+                            code == 0 and bool(visual),
+                            f"exit {code}; {len(visual)} candidate(s) cut out of the pixels",
+                        )
+            finally:
+                canvas.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    canvas.wait(timeout=5)
 
         # Everything below stands on a listing. Without one there is nothing to test *with*,
         # and the reason is the machine's, not the tool's — say so instead of blaming it.
@@ -4312,6 +4367,28 @@ def _selftest(keep: bool = False) -> int:
                 code == 0 and "ScrollItemPattern=used" in out,
                 _last_line(out),
             )
+        if _hold(checks, hwnd, DOUBLECLICK_CHECK):
+            before = button_clicks()
+            code, out = _call("double-click", "--hwnd", hwnd, "--target", button["n"], data=data)
+            landed = button_clicks() - before
+            if not interrupted(DOUBLECLICK_CHECK, code, out):
+                checks.check(
+                    DOUBLECLICK_CHECK,
+                    code == 0 and landed == 2,
+                    f"exit {code}; the button logged {landed} click(s); {_verify_line(out)}",
+                )
+        # `restore` is the door path (触手可及): minimize the probe and watch it come back —
+        # through its taskbar button if it has one, or the OS wake (the "visible but asleep"
+        # fallback) if it does not. Either is a pass; what must not happen is staying down.
+        _u32.ShowWindow(hwnd, SW_MINIMIZE)
+        time.sleep(0.5)
+        minimized = window_state(hwnd)
+        code, out = _call("restore", "--hwnd", hwnd, data=data)
+        checks.check(
+            RESTORE_CHECK,
+            minimized == "minimized" and code == 0 and window_state(hwnd) == "normal",
+            f"was {minimized}, exit {code}, now {window_state(hwnd)}; {_last_line(out)}",
+        )
         code, out = _call("release", data=data)
         checks.check("release lifts nothing when nothing is down", code == 0 and "RELEASE" in out)
 
@@ -4368,42 +4445,6 @@ def _selftest(keep: bool = False) -> int:
                     f"exit {code}; selections seen {selections[-3:]}; {_first_line(out)}",
                 )
         _close_probe(drag_probe, drag_hwnd)
-
-        # ── the third tier: a UI drawn in pixels ───────────────────────────
-        if importlib.util.find_spec("rapidocr_onnxruntime") is None:
-            checks.skip(CANVAS_CHECK, "rapidocr is not installed")
-        else:
-            canvas_log = work / "canvas.jsonl"
-            canvas = subprocess.Popen(
-                [sys.executable, _probe_script("canvas_probe2.py"), "--log", str(canvas_log)]
-            )
-            try:
-                code, out = _call("windows", "--include", "all", data=data)
-                match = re.search(r"hwnd=(\d+).*'athand canvas probe'", out)
-                if match is None:
-                    checks.check(
-                        CANVAS_CHECK,
-                        False,
-                        "the Tk probe did not show up in windows --include all",
-                    )
-                else:
-                    canvas_hwnd = int(match.group(1))
-                    code, out = _call("targets", "--hwnd", canvas_hwnd, data=data)
-                    record = _read_json(_listing_path(canvas_hwnd))
-                    visual = [
-                        item
-                        for item in record.get("targets") or []
-                        if item.get("source") == "visual"
-                    ]
-                    checks.check(
-                        CANVAS_CHECK,
-                        code == 0 and bool(visual),
-                        f"exit {code}; {len(visual)} candidate(s) cut out of the pixels",
-                    )
-            finally:
-                canvas.terminate()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    canvas.wait(timeout=5)
 
         return _selftest_summary(checks, work, keep)
     finally:
