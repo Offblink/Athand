@@ -118,7 +118,8 @@ The constants live together (`TRAY_OVERFLOW_HINTS`, `TRAY_FLYOUT_CLASSES`, `DESK
   `area * 4 < whole`, which is what keeps the full-screen `'桌面'` container row out).
 - **A taskbar row has no identity beyond its name.** Reading `AutomationId` / `HelpText` through
   comtypes raises `AttributeError` every single time, so there is no AUMID or exe-level key to match
-  on — a second window of the same program shares the door with the first one.
+  on — a second window of the same program shares the door with the first one. `_app_tokens` is what
+  the shell side matches against: the window's whole title, and the exe's stem.
 - **The overflow flyout is not created on demand; it exists hidden, and its state is the
   information.** After the arrow is clicked it goes `hidden → normal` in about 0.12s, and roughly
   0.30s later the rows are in place; the arrow is a toggle. So never press `Escape` merely because
