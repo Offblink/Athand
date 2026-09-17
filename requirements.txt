@@ -1,0 +1,5 @@
+# athand's dependencies. All four are used by skills/athand/athand.py.
+pillow                    # capture, PNG, the frame diff, the candidate binarisation
+comtypes                  # UI Automation: the coordinate source that has no error
+numpy                     # the binarisation pass (connected components, merging)
+rapidocr-onnxruntime      # OCR: reading text off a UI that draws itself
