@@ -9,17 +9,26 @@ server, no package to install.*
 `athand.py` 是 [Fungi](https://github.com/CN-Fungi/Fungi) 的桌控工具，从原来承载它的 agent 里切出来：
 机制逐字搬运（每一处 `ctypes` 声明、每一个阈值、每一条实测注释），所以设计记录留在那个仓库的
 `docs/spec.md` §35–§46，这里的注释用 `spec §NN` 引用。**给 agent 读的说明书是
-[`skills/athand/SKILL.md`](skills/athand/SKILL.md)**（流程、两条规则、16 条实测坑），那份是权威；
+[`skills/athand/SKILL.md`](skills/athand/SKILL.md)**（流程、两条规则、18 条实测坑），那份是权威；
 本文件是给人看的门面。仅 Windows。
 
-```bash
-pip install -r requirements.txt      # pillow / comtypes / numpy / rapidocr-onnxruntime
-python skills/athand/athand.py windows
-```
+## 为什么会有这个项目
+
+`Screen` 原本是 Fungi 里的一个工具。同一时期另一条路线是把整台电脑接管下来（在容器里起一个 AIOS，从系统层
+控制一切）；这条路走的是反方向 —— **不接管系统，只用既有的无障碍树、OCR 和画面去操作已经在跑的应用**，
+开销小得多。于是它被切出来，成为现在这个样子：一份 skill + 一个脚本。
+
+设计立场是一路带过来的，一句话：**绝不做被动轮询，而是做主动唤醒**。所以这里没有 daemon、没有后台监视、
+没有"每隔 N 秒看一眼屏幕"的循环 —— `athand.py` 只在你叫它的时候动作，且每个动作自带 `verify:` 与实拍帧。
+要监视什么、什么时候叫醒 agent，是调用方（agent 自己，或者将来的系统级接口）的事，不是这个工具的活。
+
+来龙去脉见作者的知乎：[我们用的是同一个 Astra 吗？](https://zhuanlan.zhihu.com/p/2084012946414483140)，
+它在 Fungi 里的样子见 [从 Psi 到 Fungi：Agent 菌丝网络与 AIOS](https://zhuanlan.zhihu.com/p/2079625942096528933)。
 
 ## 三步：`windows → targets → act`
 
 ```bash
+pip install -r requirements.txt                          # pillow / comtypes / numpy / rapidocr-onnxruntime
 python skills/athand/athand.py windows                   # 窗口表：hwnd(十进制+十六进制)、尺寸、进程、标题
 python skills/athand/athand.py targets --hwnd 4653616    # 这个窗口的控件编号 + 画了号码的 PNG
 python skills/athand/athand.py click   --hwnd 4653616 --target 3
@@ -142,6 +151,9 @@ python skills/athand/probes/desktop_door_check.py     # 约 25 秒，退出时�
 - **读它的输出走管道时设 `PYTHONIOENCODING=utf-8`**：脚本自己不选编码，Windows 子进程 stdout 不是控制台时
   按系统代码页写（本机 `gbk`），UTF-8 的读者会看到乱码。
 - **`type` / `key` 要求目标窗口真在前台**，否则拒绝：字和键只跟焦点走，不跟窗口走。
+- **它不替你监视任何东西**：无常驻进程、无屏幕差分轮询、无"变了再叫我"的回调。要等到某件事发生才动手，那件
+  事得有个**接口**（应用自己的 IPC/事件、系统通知、或调用方自己的唤醒通道）；只能靠盯着屏幕看它变才能感知
+  的状态，这个工具给不了 —— 那是接管系统那一层的题目。
 
 ## License
 
