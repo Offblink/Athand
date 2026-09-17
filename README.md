@@ -45,9 +45,12 @@ skills/athand/
                  type key scroll restore release selftest
   probes/
     target.py           Win32 window (Edit, Button, Static, 60-item ListBox) that logs
-                        every message it receives — the account the selftest judges by
+                        every message it receives — the account the selftest judges by —
+                        and can wear the shapes the doors are found through: --tool-window
+                        (no taskbar button), --tray (a notification-area icon), --hidden
     drag_probe.py       SetCapture path log + EM_GETSEL + WM_DROPFILES
     canvas_probe2.py    a Tk canvas: two controls drawn in pixels, no a11y for either
+    desktop_door_check.py   the third door, by hand: one shortcut on the desktop + win d
     drag_probe.sample.jsonl, drag_source.txt   a recorded drag path, and a file to drag
 ```
 
@@ -73,8 +76,14 @@ python skills/athand/athand.py selftest [--keep]
 
 It starts the probes and checks each gesture against what the probe itself recorded — the
 `WM_COMMAND` a button sent, the `EM_GETSEL` an edit reported, the window rectangle the OS gives
-back. A check that cannot run (say, the machine is locked) is reported `SKIP` with its reason,
-never as a pass.
+back, the `trayclick` an application logged when its own icon was clicked. A check that cannot
+run (say, the machine is locked) is reported `SKIP` with its reason, never as a pass.
+
+The shell's third door — a desktop icon — has its own check, because it costs your screen:
+
+```bash
+python skills/athand/probes/desktop_door_check.py
+```
 
 ## License
 

@@ -5,10 +5,13 @@ An Edit (a11y ValuePattern), a Button, a Static showing the click count, and a L
 application's own account, which is the only truth a click test can trust, and the account
 the selftest checks instead of believing the tool's own summary.
 
-`--tray` gives it the shape of a tray-resident application: a notification-area icon whose
-click is the *only* way its window comes back (a click is what the tool's 触手可及 path looks
-for), and WS_EX_TOOLWINDOW so it has no taskbar button to be reached through instead. The log
-then says `trayclick` — the app's own record of its door being used.
+Flags shape it into the applications whose *doors* the tool has to find:
+
+- `--tool-window`: no taskbar button (WS_EX_TOOLWINDOW), so the taskbar door is out;
+- `--tray`: a notification-area icon, plus `--tool-window` — the icon is then the only door,
+  and the log says `trayclick` when it is used;
+- `--hidden`: start with the window *not* shown, so the application is running but has nothing
+  on screen — the desktop-icon case (the only door left is the shortcut that launches it).
 
     python probes/target.py --log %TEMP%\\athand-target.jsonl --hwnd-file %TEMP%\\athand-target.hwnd
 """
@@ -40,6 +43,13 @@ HWND_FILE = _arg("--hwnd-file", os.path.join(_TEMP, "athand-target.hwnd"))
 CLASS = "AthandTargetProbe"
 TITLE = _arg("--title", "athand target")
 TRAY_MODE = "--tray" in sys.argv
+TOOL_WINDOW = TRAY_MODE or "--tool-window" in sys.argv
+HIDDEN = "--hidden" in sys.argv
+# The plain probe is a *target window*: its title tracks the click counter, which the selftest
+# reads. The shaped ones are applications, and an application's title is its own name — the
+# shell matches a door by that name as a whole token, and a counter appended to it breaks the
+# match (measured twice: once on the tray icon, once on the desktop icon, 2026-09-17).
+APP_SHAPE = TRAY_MODE or TOOL_WINDOW or HIDDEN
 EDIT, BUTTON, STATIC, LIST, TRAY = 101, 102, 103, 104, 105
 count = {"clicks": 0}
 
@@ -114,8 +124,13 @@ k.GetModuleHandleW.argtypes = [wt.LPCWSTR]
 
 
 def log(event: dict) -> None:
-    with open(LOG, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    # The directory can be gone: a test harness may clean up while this probe is still shutting
+    # down, and an exception inside a window procedure is swallowed with a traceback nobody
+    # reads (measured 2026-09-17). Losing a log line is better than losing the probe.
+    with contextlib.suppress(OSError):
+        os.makedirs(os.path.dirname(LOG) or ".", exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
 def read_edit(hwnd) -> str:
@@ -172,7 +187,7 @@ def wndproc(hwnd, msg, wparam, lparam):
         if cid == BUTTON and code == 0:  # BN_CLICKED
             count["clicks"] += 1
             u.SetWindowTextW(u.GetDlgItem(hwnd, STATIC), f"clicks={count['clicks']}")
-            if not TRAY_MODE:
+            if not APP_SHAPE:
                 # A tray app's title stays its own name: the shell's tooltip is matched against
                 # it as a whole token, and a counter appended to it would stop matching (which is
                 # what happened, measured 2026-09-17 — the icon was in the flyout and unnamed).
@@ -221,9 +236,9 @@ def main() -> int:
         print("RegisterClass failed", ctypes.get_last_error())
         return 1
     hwnd = u.CreateWindowExW(
-        WS_EX_TOOLWINDOW if TRAY_MODE else 0,
+        WS_EX_TOOLWINDOW if TOOL_WINDOW else 0,
         CLASS,
-        TITLE if TRAY_MODE else f"{TITLE} clicks=0",
+        TITLE if APP_SHAPE else f"{TITLE} clicks=0",
         0x00CF0000,
         300,
         200,
@@ -248,13 +263,14 @@ def main() -> int:
     for i in range(1, 61):
         item = ctypes.c_wchar_p(f"项目 {i:02d}")  # keep alive across the call
         u.SendMessageW(listbox, 0x0180, 0, ctypes.cast(item, ctypes.c_void_p).value)  # LB_ADDSTRING
-    u.ShowWindow(hwnd, 5)  # SW_SHOW
-    u.UpdateWindow(hwnd)
+    if not HIDDEN:
+        u.ShowWindow(hwnd, 5)  # SW_SHOW
+        u.UpdateWindow(hwnd)
     if TRAY_MODE:
         add_tray(hwnd)
     with open(HWND_FILE, "w", encoding="utf-8") as fh:
         fh.write(str(hwnd))
-    log({"ev": "started", "hwnd": hwnd, "tray": TRAY_MODE})
+    log({"ev": "started", "hwnd": hwnd, "tray": TRAY_MODE, "hidden": HIDDEN})
     msg = wt.MSG()
     while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
         u.TranslateMessage(ctypes.byref(msg))

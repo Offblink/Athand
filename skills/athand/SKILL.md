@@ -157,7 +157,8 @@ whatever has the focus. Give the shapes you will need again a `label`.
     it**: `restore` looks for a shell row whose name contains the window's whole title or the
     exe stem, so a second `python.exe` window is matched by the first one's taskbar button —
     `restore --hwnd <the other one>` then clicks *that* button and reports a wake through a door
-    its own window never used (measured 2026-09-17). Distinct programs, distinct stems.
+    its own window never used (measured 2026-09-17). Distinct programs, distinct stems; and start
+    a GUI target with `pythonw.exe`, or your own terminal's button answers for it.
 13. **A tray icon is inside the overflow flyout, and the flyout grows as it fills**: a row
     rectangle read the moment the flyout appears can point a slot off — the first click landed
     on the neighbouring icon and opened *that* application's panel. The tool now waits for the
@@ -165,6 +166,21 @@ whatever has the focus. Give the shapes you will need again a `label`.
     click the flyout is deliberately **left open**: closing it measured taking the app's own
     panel down with it (2026-09-13), so the result says "the notification flyout is still open"
     instead of tidying up.
+14. **`win d` is a toggle, not "show the desktop"**: pressed while the user's windows are already
+    minimized it brings them all back — which covers the desktop icon, and the tool then rightly
+    refuses to click it (`the point … belongs to …`). Ask what is on top at the icon
+    (`WindowFromPoint`, made DPI-aware first) and press `win d` only when the desktop is not the
+    answer; that is also how you put the user's windows back afterwards.
+15. **A console program renames its console — i.e. your terminal — to its command line**, and the
+    title stays. Put the target's `--title` in such a command line and the terminal's own taskbar
+    button starts matching the same tokens as the window, so the wake clicks the terminal instead
+    of the door (measured 2026-09-17). Cheap rules: drive GUI targets with `pythonw.exe`, keep the
+    target's name out of console command lines, and clean up leftovers **by window class**, never
+    by a title — a leftover titled `<name> clicks=0` survived a cleanup that looked for `<name>`
+    and kept answering for it.
+16. **`restore --via auto` decides for you**: for a plain Win32 window it correctly prefers
+    `ShowWindow`, so the shell door is never tried. When the door is what you mean to test, say so
+    — `restore --via shell`.
 
 ## `unverified` and `ESCALATED`
 
@@ -193,8 +209,15 @@ that matter.
 
 Two of the three doors are covered here: the taskbar button, and a tray-only window reached
 through the overflow flyout (`probes/target.py --tray` is a tool window with a notification icon
-and no taskbar button). The desktop-icon door is not — it needs `key --keys win d` and a shortcut
-on the desktop, which is the user's own screen; it is documented, not tested.
+and no taskbar button). The **desktop-icon door is covered by its own check**, because it costs
+your screen — one shortcut on the desktop and a `win d`:
+
+```bash
+python probes/desktop_door_check.py     # ~25s, writes and removes one .lnk, puts your windows back
+```
+
+It is not in `selftest` for exactly that reason; it was run twice on 2026-09-17 (all checks
+passed, no leftovers).
 
 It **injects real input and takes the foreground**, so run it when the desktop is yours. The
 foreground guard exists because of a measured run: started seconds after the user came back, half
