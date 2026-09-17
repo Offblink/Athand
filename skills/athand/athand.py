@@ -4153,16 +4153,27 @@ def _selftest(keep: bool = False) -> int:
                 [sys.executable, _probe_script("canvas_probe2.py"), "--log", str(canvas_log)]
             )
             try:
-                code, out = _call("windows", "--include", "all", data=data)
-                match = re.search(r"hwnd=(\d+).*'athand canvas probe'", out)
-                if match is None:
+                # Tk takes a moment to map its window (python + tkinter + the first update):
+                # asking once is a race this lost on 2026-09-17 ("the Tk probe did not show up"),
+                # so wait for it, and give up early if the probe itself died.
+                canvas_hwnd = 0
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    _code, listed = _call("windows", "--include", "all", data=data)
+                    match = re.search(r"hwnd=(\d+).*'athand canvas probe'", listed)
+                    if match is not None:
+                        canvas_hwnd = int(match.group(1))
+                        break
+                    if canvas.poll() is not None:
+                        break
+                    time.sleep(0.5)
+                if not canvas_hwnd:
                     checks.check(
                         CANVAS_CHECK,
                         False,
-                        "the Tk probe did not show up in windows --include all",
+                        f"the Tk probe never appeared (it exited with {canvas.poll()})",
                     )
                 else:
-                    canvas_hwnd = int(match.group(1))
                     code, out = _call("targets", "--hwnd", canvas_hwnd, data=data)
                     record = _read_json(_listing_path(canvas_hwnd))
                     visual = [
