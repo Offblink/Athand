@@ -5,6 +5,11 @@ An Edit (a11y ValuePattern), a Button, a Static showing the click count, and a L
 application's own account, which is the only truth a click test can trust, and the account
 the selftest checks instead of believing the tool's own summary.
 
+`--tray` gives it the shape of a tray-resident application: a notification-area icon whose
+click is the *only* way its window comes back (a click is what the tool's 触手可及 path looks
+for), and WS_EX_TOOLWINDOW so it has no taskbar button to be reached through instead. The log
+then says `trayclick` — the app's own record of its door being used.
+
     python probes/target.py --log %TEMP%\\athand-target.jsonl --hwnd-file %TEMP%\\athand-target.hwnd
 """
 
@@ -17,6 +22,7 @@ from ctypes import wintypes as wt
 
 u = ctypes.WinDLL("user32", use_last_error=True)
 k = ctypes.WinDLL("kernel32", use_last_error=True)
+shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 
 
 def _arg(name: str, default: str) -> str:
@@ -32,8 +38,43 @@ _TEMP = os.environ.get("TEMP") or os.environ.get("TMP") or "."
 LOG = _arg("--log", os.path.join(_TEMP, "athand-target.jsonl"))
 HWND_FILE = _arg("--hwnd-file", os.path.join(_TEMP, "athand-target.hwnd"))
 CLASS = "AthandTargetProbe"
-EDIT, BUTTON, STATIC, LIST = 101, 102, 103, 104
+TITLE = _arg("--title", "athand target")
+TRAY_MODE = "--tray" in sys.argv
+EDIT, BUTTON, STATIC, LIST, TRAY = 101, 102, 103, 104, 105
 count = {"clicks": 0}
+
+# ── the tray icon (`--tray`) ────────────────────────────────────────────────
+NIM_ADD, NIM_DELETE = 0, 2
+NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x0001, 0x0002, 0x0004
+WM_TRAY = 0x0400 + 1  # WM_APP + 1: the callback message this icon is registered with
+WM_LBUTTONUP = 0x0202
+WS_EX_TOOLWINDOW = 0x00000080  # no taskbar button: the tray icon is the only door
+
+
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wt.DWORD),
+        ("hWnd", wt.HWND),
+        ("uID", wt.UINT),
+        ("uFlags", wt.UINT),
+        ("uCallbackMessage", wt.UINT),
+        ("hIcon", wt.HICON),
+        ("szTip", wt.WCHAR * 128),
+        ("dwState", wt.DWORD),
+        ("dwStateMask", wt.DWORD),
+        ("szInfo", wt.WCHAR * 256),
+        ("uTimeoutOrVersion", wt.UINT),
+        ("szInfoTitle", wt.WCHAR * 64),
+        ("dwInfoFlags", wt.DWORD),
+        ("guidItem", ctypes.c_byte * 16),
+        ("hBalloonIcon", wt.HICON),
+    ]
+
+
+shell32.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+shell32.Shell_NotifyIconW.restype = wt.BOOL
+u.LoadIconW.argtypes = [wt.HINSTANCE, wt.LPCWSTR]
+u.LoadIconW.restype = wt.HICON
 
 if "--dpi-aware" in sys.argv:
     # Off by default: a DPI-unaware probe is the common real-world target, and it is what
@@ -92,6 +133,33 @@ def read_edit(hwnd) -> str:
     return buf.value
 
 
+def add_tray(hwnd) -> None:
+    """A notification-area icon whose click brings the window back.
+
+    This is the door a tray-resident application actually has. Paired with WS_EX_TOOLWINDOW it
+    is the *only* one: with no taskbar button, the tool's 触手可及 path has to find this icon —
+    in the visible strip or behind the overflow chevron — and click it (measured 2026-09-17).
+    """
+    data = NOTIFYICONDATAW()
+    data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+    data.hWnd = hwnd
+    data.uID = TRAY
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+    data.uCallbackMessage = WM_TRAY
+    data.hIcon = u.LoadIconW(None, ctypes.cast(ctypes.c_void_p(32512), wt.LPCWSTR))  # IDI_APPLIC
+    data.szTip = TITLE
+    added = shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data))
+    log({"ev": "tray_add", "ok": bool(added), "icon": bool(data.hIcon), "tip": TITLE})
+
+
+def remove_tray(hwnd) -> None:
+    data = NOTIFYICONDATAW()
+    data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+    data.hWnd = hwnd
+    data.uID = TRAY
+    shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
+
+
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, wt.HWND, ctypes.c_uint, wt.WPARAM, wt.LPARAM)
 
 
@@ -104,12 +172,24 @@ def wndproc(hwnd, msg, wparam, lparam):
         if cid == BUTTON and code == 0:  # BN_CLICKED
             count["clicks"] += 1
             u.SetWindowTextW(u.GetDlgItem(hwnd, STATIC), f"clicks={count['clicks']}")
-            u.SetWindowTextW(hwnd, f"athand target clicks={count['clicks']}")
+            if not TRAY_MODE:
+                # A tray app's title stays its own name: the shell's tooltip is matched against
+                # it as a whole token, and a counter appended to it would stop matching (which is
+                # what happened, measured 2026-09-17 — the icon was in the flyout and unnamed).
+                u.SetWindowTextW(hwnd, f"{TITLE} clicks={count['clicks']}")
+    elif msg == WM_TRAY:
+        action = lparam & 0xFFFF
+        log({"ev": "tray", "action": action})
+        if action == WM_LBUTTONUP:
+            u.ShowWindow(hwnd, 9)  # SW_RESTORE: coming back on screen is what this icon is for
+            u.SetForegroundWindow(hwnd)
+            log({"ev": "trayclick"})
     elif msg == 0x0201:  # WM_LBUTTONDOWN
         log({"ev": "lbuttondown", "x": lparam & 0xFFFF, "y": (lparam >> 16) & 0xFFFF})
     elif msg == 0x0010:  # WM_CLOSE
         u.DestroyWindow(hwnd)
     elif msg == 0x0002:  # WM_DESTROY
+        remove_tray(hwnd)
         u.PostQuitMessage(0)
     return u.DefWindowProcW(hwnd, msg, wparam, lparam)
 
@@ -141,8 +221,18 @@ def main() -> int:
         print("RegisterClass failed", ctypes.get_last_error())
         return 1
     hwnd = u.CreateWindowExW(
-        0, CLASS, "athand target clicks=0", 0x00CF0000,
-        300, 200, 520, 460, None, None, instance, None,
+        WS_EX_TOOLWINDOW if TRAY_MODE else 0,
+        CLASS,
+        TITLE if TRAY_MODE else f"{TITLE} clicks=0",
+        0x00CF0000,
+        300,
+        200,
+        520,
+        460,
+        None,
+        None,
+        instance,
+        None,
     )
     if not hwnd:
         print("CreateWindow failed", ctypes.get_last_error())
@@ -160,9 +250,11 @@ def main() -> int:
         u.SendMessageW(listbox, 0x0180, 0, ctypes.cast(item, ctypes.c_void_p).value)  # LB_ADDSTRING
     u.ShowWindow(hwnd, 5)  # SW_SHOW
     u.UpdateWindow(hwnd)
+    if TRAY_MODE:
+        add_tray(hwnd)
     with open(HWND_FILE, "w", encoding="utf-8") as fh:
         fh.write(str(hwnd))
-    log({"ev": "started", "hwnd": hwnd})
+    log({"ev": "started", "hwnd": hwnd, "tray": TRAY_MODE})
     msg = wt.MSG()
     while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
         u.TranslateMessage(ctypes.byref(msg))

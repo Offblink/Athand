@@ -3361,13 +3361,27 @@ def _tray_overflow_entry(win: Win, tray_rows: list[Target]) -> Entry | None:
         set_foreground(tray)
         click_at(*chevron.center)
     deadline = time.monotonic() + TRAY_FLYOUT_S
+    last: tuple | None = None
+    candidate: Target | None = None
     while time.monotonic() < deadline:
         flyout = _tray_flyout()
         if flyout is not None:
             found = _shell_row(_surface_rows(flyout.hwnd), win)
             if found is not None:
-                return _entry(flyout.hwnd, found, "托盘图标", 1)
+                candidate = found
+                # The flyout *grows* as it fills, so a rectangle read the moment it appears can
+                # point a slot off: measured 2026-09-17, the first click landed on the
+                # neighbouring icon and opened that application's panel — the wake's retry got it
+                # right, but a misfire that opens a stranger's panel is not something to leave in.
+                # Wait for the surface to stop moving and click the row as it is then.
+                sample = (window_rect(flyout.hwnd), found.rect)
+                if sample == last:
+                    return _entry(flyout.hwnd, found, "托盘图标", 1)
+                last = sample
         time.sleep(0.1)
+    if candidate is not None:
+        # An unsettled flyout is still worth a click: the retry path is what the caller has.
+        return _entry(flyout.hwnd, candidate, "托盘图标", 1)
     if opened:
         _close_tray_flyout()
     return None
@@ -3903,14 +3917,32 @@ def _call(*argv: str, data: Path, timeout: float = 120.0) -> tuple[int, str]:
     return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
+def _probe_python() -> str:
+    """The interpreter a tray probe is started with: `pythonw.exe` where it exists.
+
+    It has to look like an application of its own. Every other probe runs as `python.exe`, and
+    the shell-door match is the window title *plus the process stem* (`_app_tokens`), so a second
+    python probe is matched by the first one's taskbar button — `restore` then clicked the other
+    probe's button and reported a wake through a door this window never used (measured
+    2026-09-17). A distinct stem is exactly what a real tray app has.
+    """
+    beside = Path(sys.executable).with_name("pythonw.exe")
+    return str(beside) if beside.exists() else sys.executable
+
+
 def _start_probe(
-    script: str, work: Path, name: str, checks: _Checks, extra: tuple[str, ...] = ()
+    script: str,
+    work: Path,
+    name: str,
+    checks: _Checks,
+    extra: tuple[str, ...] = (),
+    python: str | None = None,
 ) -> tuple[subprocess.Popen, int] | None:
     log = work / f"{name}.jsonl"
     hwnd_file = work / f"{name}.hwnd"
     proc = subprocess.Popen(
         [
-            sys.executable,
+            python or sys.executable,
             _probe_script(script),
             "--log",
             str(log),
@@ -3988,6 +4020,7 @@ KEY_CHECK = "key presses land, and X replaces the Ctrl+A selection"
 SCROLL_CHECK = "scroll uses ScrollItemPattern"
 DOUBLECLICK_CHECK = "double-click presses twice (the app logged two clicks)"
 RESTORE_CHECK = "restore brings a minimized window back"
+TRAY_CHECK = "restore wakes a tray-only window through its own tray icon"
 DRAG_MOVE_CHECK = "drag --from titlebar moves the window by the shift it was given"
 DRAG_SELECT_CHECK = "drag carries a selection the app reports (EM_GETSEL)"
 CANVAS_CHECK = "targets reads a canvas UI off the picture"
@@ -4014,6 +4047,7 @@ SKIPPED_WHILE_LOCKED = (
     SCROLL_CHECK,
     DOUBLECLICK_CHECK,
     RESTORE_CHECK,
+    TRAY_CHECK,
     DRAG_MOVE_CHECK,
     DRAG_SELECT_CHECK,
 )
@@ -4380,6 +4414,35 @@ def _selftest(keep: bool = False) -> int:
             minimized == "minimized" and code == 0 and window_state(hwnd) == "normal",
             f"was {minimized}, exit {code}, now {window_state(hwnd)}; {_last_line(out)}",
         )
+        # ── the third door: a tray icon behind the overflow chevron ────────
+        # The probe is a tool window with a notification-area icon and no taskbar button, so the
+        # only door it has is that icon — and the icon is inside the overflow flyout. `restore`
+        # has to find it there and click it, and the app's own log says whether it was reached
+        # (`trayclick`) rather than the tool's summary of its own click.
+        started = _start_probe(
+            "target.py",
+            work,
+            "tray",
+            checks,
+            ("--dpi-aware", "--tray", "--title", "athand tray probe"),
+            python=_probe_python(),
+        )
+        if started is None:
+            checks.check(TRAY_CHECK, False, "the tray probe did not come up")
+        else:
+            tray_probe, tray_hwnd = started
+            probes.append(started)
+            tray_log = work / "tray.jsonl"
+            _u32.ShowWindow(tray_hwnd, SW_MINIMIZE)
+            time.sleep(0.6)
+            code, out = _call("restore", "--hwnd", tray_hwnd, data=data)
+            woken = any(e.get("ev") == "trayclick" for e in _events(tray_log))
+            checks.check(
+                TRAY_CHECK,
+                code == 0 and window_state(tray_hwnd) == "normal" and woken,
+                f"exit {code}; the app logged its own tray click: {woken}; {_last_line(out)}",
+            )
+            _close_probe(tray_probe, tray_hwnd)
         code, out = _call("release", data=data)
         checks.check("release lifts nothing when nothing is down", code == 0 and "RELEASE" in out)
 

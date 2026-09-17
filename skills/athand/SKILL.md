@@ -153,6 +153,18 @@ whatever has the focus. Give the shapes you will need again a `label`.
     guard: `target_problem` asks `WindowFromPoint` and refuses when the point belongs to
     something else. `key --keys win d` still works with nothing raised — the desktop and the
     taskbar are exempt, by their own rule.
+12. **The door is matched by title *and* process stem, so two windows of the same program share
+    it**: `restore` looks for a shell row whose name contains the window's whole title or the
+    exe stem, so a second `python.exe` window is matched by the first one's taskbar button —
+    `restore --hwnd <the other one>` then clicks *that* button and reports a wake through a door
+    its own window never used (measured 2026-09-17). Distinct programs, distinct stems.
+13. **A tray icon is inside the overflow flyout, and the flyout grows as it fills**: a row
+    rectangle read the moment the flyout appears can point a slot off — the first click landed
+    on the neighbouring icon and opened *that* application's panel. The tool now waits for the
+    flyout's rectangle and the row to stop moving before clicking. After a successful tray
+    click the flyout is deliberately **left open**: closing it measured taking the app's own
+    panel down with it (2026-09-13), so the result says "the notification flyout is still open"
+    instead of tidying up.
 
 ## `unverified` and `ESCALATED`
 
@@ -173,10 +185,16 @@ frame diff). Three outcomes:
 
 `python athand.py selftest` starts the probes in `probes/` and checks every gesture against what
 the probe *itself* recorded (the `WM_COMMAND` a button sent, the `EM_GETSEL` an edit reported,
-the window rectangle the OS gives back). `--keep` keeps the work directory with the JSONL logs,
-the PNGs and the listings. A check that cannot run is reported `SKIP` with its reason, never as a
-pass — "the machine is locked" and "the probe cannot hold the foreground: the machine is in use"
-are the two that matter.
+the window rectangle the OS gives back, the `trayclick` an app logged when its own icon was
+clicked). 18 checks; `--keep` keeps the work directory with the JSONL logs, the PNGs and the
+listings. A check that cannot run is reported `SKIP` with its reason, never as a pass — "the
+machine is locked" and "the probe cannot hold the foreground: the machine is in use" are the two
+that matter.
+
+Two of the three doors are covered here: the taskbar button, and a tray-only window reached
+through the overflow flyout (`probes/target.py --tray` is a tool window with a notification icon
+and no taskbar button). The desktop-icon door is not — it needs `key --keys win d` and a shortcut
+on the desktop, which is the user's own screen; it is documented, not tested.
 
 It **injects real input and takes the foreground**, so run it when the desktop is yours. The
 foreground guard exists because of a measured run: started seconds after the user came back, half
