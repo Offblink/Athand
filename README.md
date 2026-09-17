@@ -81,6 +81,7 @@ python skills/athand/athand.py restore --hwnd 4653616    # 从最小化/托盘�
 ```
 skills/athand/
   SKILL.md      给 agent 的说明书（流程、规则、坑）
+  NOTES.md      改这个工具时的开发/验证笔记（探针、18 行判据、基线、两条守卫、三条门、踩过的坑）
   athand.py     整个工具：windows targets shot label click double-click drag
                 type key scroll restore release selftest
   probes/
@@ -127,6 +128,10 @@ python skills/athand/probes/desktop_door_check.py     # 约 25 秒，退出时�
 真机用例：驱动一个 **Qt 自绘**的聊天客户端（a11y 里什么都没有）——托盘图标把窗口叫回来 → 按 OCR 编号
 点开一个联系人 → 把桌面上的一个文件拖进输入框 → 逐字打 140 个字（0.15 s/字）→ 点发送；每一步都读回
 实拍帧确认。
+
+要改 `athand.py` 的人请先读 [`skills/athand/NOTES.md`](skills/athand/NOTES.md)：18 行判据的逐项名字、
+基线怎么刷新、两条守卫与三条门的实现细节，以及只在改工具时才会咬人的那些坑（`Win+D` 会把探针一起
+最小化、跨进程读 `Edit` 是假的、清理只能按窗口类名……）。
 
 ## 边界
 

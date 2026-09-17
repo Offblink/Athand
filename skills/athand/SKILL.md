@@ -49,8 +49,13 @@ afterwards. **Look at that path** before deciding the action worked.
 2. **Creating, deleting, renaming or moving a file is not a desktop gesture.** That goes through
    the shell (`bash`: `mkdir`/`mv`/`rm`, or the file tools). A pixel path has to be resolved into
    a rectangle first, and one resolved onto the wrong row is a data accident, not a stray click.
-   (`del` does not use the Recycle Bin — measured.) *Handing* a file to an application (into a
-   text box, onto a drop area) is not a file operation: that is `drag`.
+   `del` does not use the Recycle Bin — measured: `cmd /c del <file>` left the Recycle Bin
+   namespace at 11 entries, while
+   `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('<path>','OnlyErrorDialogs','SendToRecycleBin')"`
+   took it to 12 (exit code 0; the directory call is `DeleteDirectory`). Deleting the user's data
+   is the same permission question as moving it: use the second form, or ask.
+   *Handing* a file to an application (into a text box, onto a drop area) is not a file
+   operation: that is `drag`.
 
 ## Commands
 
@@ -86,6 +91,12 @@ addressable control at all.
   what it was asked to).
 - The drop end is an anchor **in the program**: `--to-target`/`--to-name` in `--to-hwnd`, or that
   window's client-area centre, shifted by `--dx`/`--dy` (a *relative* shift, never a position).
+- A window that draws itself usually offers **no candidate for its input box** — nothing cuts a
+  blank area into a shape — so the drop end has to be that window's client-area centre plus a
+  relative shift. Read the window rectangle out of the listing JSON, work out the blank centre of
+  the box, and pass the difference as `--dx`/`--dy`. The tool prints the drop point it actually
+  used, so check it against the box; such a box is wide enough that ±20px does not matter, and
+  chasing pixels is not what this is for.
 - No `--to-hwnd` = a carry inside one window.
 - `--route taskbar` is the way past a covering window: the thing is carried onto the
   destination's taskbar button and held until the shell brings that window forward (that is how
@@ -189,6 +200,16 @@ whatever has the focus. Give the shapes you will need again a `label`.
 16. **`restore --via auto` decides for you**: for a plain Win32 window it correctly prefers
     `ShowWindow`, so the shell door is never tried. When the door is what you mean to test, say so
     — `restore --via shell`.
+17. **A taskbar button is a toggle for the window it belongs to**, so the entry of the window that
+    is already in front minimizes it instead of waking it — the door code refuses that one
+    (`it is already on screen and in front — nothing to open`). Same gesture, and worth knowing
+    before you blame the door: with exactly two windows up the button opens a **thumbnail flyout**,
+    the click lands on the thumbnail *image* rather than the title text, and `Escape` does not
+    close it.
+18. **A door can be missing entirely.** The row and the window are matched by whole words, so when
+    the shell's name for an entry shares no word with any window title there is nothing to click.
+    Measured: a console's row reads `智能终端 - 2 个运行窗口` while the window calls itself `π : …`.
+    `WindowFromPoint` answering 0 at some taskbar coordinates is the same shape of hole.
 
 ## `unverified` and `ESCALATED`
 
@@ -206,6 +227,9 @@ frame diff). Three outcomes:
   Clicking again is what this line exists to prevent.
 
 ## Selftest
+
+The rows, the recorded baseline, the probe switches and the traps that only bite when you *change*
+this tool live in [`NOTES.md`](NOTES.md) — read it before touching `athand.py`.
 
 `python athand.py selftest` starts the probes in `probes/` and checks every gesture against what
 the probe *itself* recorded (the `WM_COMMAND` a button sent, the `EM_GETSEL` an edit reported,
