@@ -104,6 +104,10 @@ pip install -r requirements.txt      # pillow, comtypes, numpy, rapidocr-onnxrun
 
 ## 验证
 
+这一节说的是**怎么自证**，不是使用的前提：不跑它也能用（`windows → targets → act` 照走，每个动作自己会打印
+`verify:` 和实拍帧）。它是**改动这个工具时的回归账**——仓库里没有 CI、没有单元测试，探针就是唯一的判据，
+改了 `athand.py` 却不跑这两条，等于没验。
+
 ```bash
 python skills/athand/athand.py selftest [--keep]
 ```
