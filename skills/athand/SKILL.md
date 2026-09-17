@@ -17,8 +17,12 @@ python skills/athand/athand.py type    --hwnd 4653616 --target 7 --text "你好"
 python skills/athand/athand.py drag    --hwnd 4653616 --target 7 --dx 300
 ```
 
-Run it with `PYTHONIOENCODING=utf-8` when you read its output through a pipe, or Chinese text
-comes back as mojibake (measured: a `stdout=PIPE` child on this box speaks cp936).
+Set `PYTHONIOENCODING=utf-8` when you read its output through a **pipe**. The script does not
+choose an encoding: a Windows child whose stdout is not a console writes the ANSI code page —
+`gbk` on this box (measured: a bare child reports `sys.stdout.encoding == 'gbk'`), which a UTF-8
+reader sees as mojibake. An agent harness often already exports `PYTHONUTF8=1`, which makes it
+UTF-8 anyway (this one does, which is why it usually looks fine); the variable is what makes it
+deterministic.
 
 ## The flow: windows → targets → act
 
@@ -76,6 +80,10 @@ drop needs no focus, which is why it also works in an app whose input box expose
 addressable control at all.
 
 - The grab end is a target in `--hwnd`, or `--from titlebar` for the window's own title bar.
+  A target is grabbed at its **centre**, so a selection drag inside a text box needs the box to
+  have text under that centre — drag in an empty area of a control and nothing is selected
+  (measured 2026-09-17: the tool reported "nothing changed on screen" and it had done exactly
+  what it was asked to).
 - The drop end is an anchor **in the program**: `--to-target`/`--to-name` in `--to-hwnd`, or that
   window's client-area centre, shifted by `--dx`/`--dy` (a *relative* shift, never a position).
 - No `--to-hwnd` = a carry inside one window.
