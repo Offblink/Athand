@@ -1,4 +1,4 @@
-# athand
+# Athand
 
 **触手可及** —— 给 agent 一双直接操作本机桌面的手：一个脚本、几个子命令，没有 daemon、没有 MCP、
 没有要装的服务，clone 下来就能调。
