@@ -3188,7 +3188,8 @@ def _app_tokens(win: Win) -> list[str]:
     (the window title, the process stem). The taskbar names a button after the
     app's display name, not after its exe — measured on this box: '智能终端 - 1
     个运行窗口' for WindowsTerminal.exe — so the title is the better token, and the
-    tray tooltip happens to carry it too (' QQ: 3754901636…').
+    tray tooltip happens to carry it too (an app that calls itself "QQ" writes its
+    tooltip as ' QQ: <an account number>…' — the name, with a leading space).
     """
     tokens = [_norm(win.title).strip(), _norm(Path(win.proc).stem) if win.proc else ""]
     return [token for token in tokens if len(token) >= 2]
@@ -3223,7 +3224,7 @@ def _shell_row(rows: list[Target], win: Win) -> Target | None:
     differently (measured 2026-09-13):
 
     * the row **contains** the window's title or process stem — 'QQ' on the desktop,
-      'QQ: 3754901636' in the tray, 'Microsoft Edge - 1 个运行窗口' for a title of
+      'QQ: 1234567890' in the tray, 'Microsoft Edge - 1 个运行窗口' for a title of
       'Fungi - 个人 - Microsoft\u200b Edge';
     * the row's application name is **contained in** the window's title — the Explorer
       case that the first direction alone never matched: the button says
@@ -3313,7 +3314,7 @@ def _desktop_reachable(point: tuple[int, int]) -> bool:
 
 def _entry(surface: int, found: Target, where: str, clicks: int, *, raise_first=False) -> Entry:
     """One door on screen. The label is the row's own first line, trimmed — the tray
-    writes its tooltip with a leading space (' QQ: 3754901636…')."""
+    writes its tooltip with a leading space (' QQ: 1234567890…')."""
     return Entry(surface, found, where, clicks, found.name.splitlines()[0].strip(), raise_first)
 
 
