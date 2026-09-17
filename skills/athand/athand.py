@@ -86,7 +86,6 @@ TYPE_CHAR_DELAY_S = 0.15  # 逐字输入: the gap between characters — a *watc
 # second) is a blur: the text appears as if it had been pasted, which is the thing this
 # style exists to avoid. The knob stays — `char_delay` overrides it per call (spec §37).
 LAUNCH_WAIT_S = 3.0  # a gesture that starts a process: its window is not up immediately
-SHOT_MAX_DIM = 1568  # same vision sweet spot as files.IMAGE_MAX_DIM
 
 _u32 = ctypes.WinDLL("user32", use_last_error=True)
 _gdi = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -485,10 +484,6 @@ class Frame:
     origin: tuple[int, int]
     hwnd: int | None
     ts: float
-
-    def screen_rect(self) -> tuple[int, int, int, int]:
-        ox, oy = self.origin
-        return (ox, oy, ox + self.image.width, oy + self.image.height)
 
     def to_local(self, rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         ox, oy = self.origin
@@ -1202,7 +1197,6 @@ _EXTENDED_VK = frozenset(
     {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2C, 0x2D, 0x2E, 0x5B, 0x6F}
 )
 _MODIFIER_VK = frozenset({0x10, 0x11, 0x12, 0x5B})
-MODIFIER_NAMES = frozenset({"shift", "ctrl", "control", "alt", "win", "meta", "cmd", "command"})
 _held: set[int] = set()
 _held_buttons: set[str] = set()
 
@@ -3664,20 +3658,6 @@ _INPUT_ACTIONS = {
     "key": _action_key,
     "scroll": _action_scroll,
 }
-COMMANDS = (
-    "windows",
-    "shot",
-    "targets",
-    "label",
-    "click",
-    "double-click",
-    "drag",
-    "type",
-    "key",
-    "scroll",
-    "restore",
-    "release",
-)
 
 
 def _needs_listing(action: str, args: dict) -> bool:
