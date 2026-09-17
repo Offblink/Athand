@@ -46,7 +46,6 @@ import sys
 import tempfile
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +56,6 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageGrab, ImageStat
 FAILURE_LIMIT = 3  # strikes before the run stops trying and says so (Fungi asked its user
 # here; a script has nobody to ask, so this is where `ESCALATED:` comes from)
 MAX_CANDIDATES = 60
-LISTINGS_MAX = 8  # windows whose classified candidates a session keeps (a drag needs two)
 DIFF_THRESHOLD = 0.002  # fraction of changed pixels that counts as an effect
 SETTLE_S = 0.30  # let the app repaint before the verifying frame
 DOUBLE_CLICK_GAP_S = 0.06  # well inside the system's double-click time (default 0.5s)
@@ -78,6 +76,9 @@ DRAG_VIA_WAIT_S = 3.0  # hovering a taskbar button until the shell brings its wi
 # the shell's own drag-over-taskbar activation is what a person relies on (user, 2026-09-17),
 # and it takes about a second — the window is not asked to appear, it is waited for
 DRAG_VIA_POLL_S = 0.15  # how often that wait re-reads whether the drop point is reachable
+STRIKE_WINDOW_S = 600  # how long a fruitless attempt counts against the next one: the counter
+# outlives the process (a run performs one action, so it has to), and "three in a row" must
+# not mean "three spread over a day"
 SM_CYCAPTION = 4  # GetSystemMetrics: the height of a window's own title bar
 BUTTON_VK = {"left": 0x01, "right": 0x02}  # GetAsyncKeyState: is the button still down?
 TYPE_CHAR_DELAY_S = 0.15  # 逐字输入: the gap between characters — a *watchable* pace
@@ -640,12 +641,20 @@ def _diff_ratio(before: Frame, after: Frame) -> float:
 # down instead of held in a process: the numbered listing (`<hwnd>.json`, read back by the
 # next call) and the picture — a PNG whose *path* is printed, because that is the only shape
 # a picture can take in stdout.
-DATA_DIR = Path(
-    os.environ.get("ATHAND_DIR")
-    or os.environ.get("TEMP")
-    or os.environ.get("TMP")
-    or tempfile.gettempdir()
-) / "athand"
+def _data_dir() -> Path:
+    """`%TEMP%\\athand`, or `ATHAND_DIR` verbatim.
+
+    The override is the test hook: a selftest run then leaves nothing of its own in the
+    user's directory, and every child it starts is pointed at the same place.
+    """
+    override = os.environ.get("ATHAND_DIR")
+    if override:
+        return Path(override)
+    temp = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+    return Path(temp) / "athand"
+
+
+DATA_DIR = _data_dir()
 
 
 def _data_file(stem: str, suffix: str) -> Path:
@@ -1672,7 +1681,8 @@ def release_all_keys() -> list[str]:
     _held.clear()
     return sorted(f"0x{vk:02X}" for vk in stuck)
 
-# ── the session: arming, candidates, two frames, strike counts ─────────────
+
+# ── the session: candidates, and where the window was when they were cut ────
 @dataclass
 class Listing:
     """One window's numbered candidates, and where that window was when they were cut.
@@ -1688,9 +1698,12 @@ class Listing:
 
 @dataclass
 class Session:
-    """Everything the tool remembers between calls. Pixels are deliberately
-    just the current and the previous frame (spec §35.4): enough to answer "did
-    that change anything", never a screen recorder."""
+    """What this run knows about the windows it has been asked about.
+
+    A fresh process holds no pixels of its own: every action greps the frames it needs (one
+    before the gesture, one after) and compares them there. Fungi kept the last two frames to
+    answer "did that change anything" across tool calls; here nothing outlives the call, so
+    nothing keeps them."""
 
     # No permission state lives here: running this script is the consent (the user's
     # decision of 2026-09-13, unchanged) and a script is the same kind of switch —
@@ -1702,8 +1715,6 @@ class Session:
     labels: dict[str, Target] = field(default_factory=dict)
     labels_hwnd: int = 0
     labels_rect: tuple[int, int, int, int] | None = None
-    frames: deque[Frame] = field(default_factory=lambda: deque(maxlen=2))
-    failures: dict[str, int] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def disarm(self) -> None:
@@ -1711,20 +1722,15 @@ class Session:
         self.labels_hwnd = 0
         self.labels_rect = None
         self.listings.clear()
-        self.frames.clear()
-
-    def remember(self, frame: Frame) -> None:
-        self.frames.append(frame)
 
 
 _session = Session()
 
 
 def disarm() -> None:
-    """End the armed window; releases keys and mouse buttons, drops frames, forgets
-    candidates and listings. Bound to the process exit, so a crash
-    cannot leave the host's keyboard half-pressed or its left button still dragging
-    whatever the pointer crosses.
+    """Releases keys and mouse buttons, and forgets candidates and listings. Bound to the
+    process exit, so a crash cannot leave the host's keyboard half-pressed or its left button
+    still dragging whatever the pointer crosses.
 
     Nothing is announced: a tray toast pops over the very screen being driven and
     steals focus from it (user decision 2026-09-13 — spec §35.14)."""
@@ -1780,9 +1786,13 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
-def _write_listing(hwnd: int, targets: list[Target], frame_path: str, note: str) -> Path:
+def _write_listing(hwnd: int, records: list[dict], frame_path: str, note: str) -> Path:
     """The numbers, written down with the rectangle they were cut from: a later call can only
-    tell a fresh listing from a stale one by asking where the window was."""
+    tell a fresh listing from a stale one by asking where the window was.
+
+    Takes the candidate *records* rather than the targets: what is stored has to be what the
+    program read (names and all), never the labels laid over them for display.
+    """
     path = _listing_path(hwnd)
     _write_json(
         path,
@@ -1794,7 +1804,7 @@ def _write_listing(hwnd: int, targets: list[Target], frame_path: str, note: str)
             "rect": list(window_rect(hwnd) or ()),
             "state": window_state(hwnd),
             "frame": frame_path,
-            "targets": [_target_record(cand) for cand in targets],
+            "targets": records,
         },
     )
     return path
@@ -1815,6 +1825,21 @@ def _save_labels(hwnd: int) -> None:
     )
 
 
+def _load_labels(hwnd: int) -> None:
+    """The names given to shapes are their own file, and every listing and every `--name`
+    call reads them back: for a picture-only listing they are the only way to address a
+    shape twice, and the process that gave them is long gone."""
+    labels = _read_json(_labels_path(hwnd))
+    if not labels:
+        return
+    with _session.lock:
+        _session.labels = {
+            name: _target_from_record(item) for name, item in (labels.get("labels") or {}).items()
+        }
+        _session.labels_hwnd = hwnd
+        _session.labels_rect = tuple(labels.get("rect") or ()) or None
+
+
 def _load_listing(hwnd: int) -> str | None:
     """Read this window's last listing back into the session — or explain why it cannot be used.
 
@@ -1822,15 +1847,7 @@ def _load_listing(hwnd: int) -> str | None:
     number in it, and every rectangle a label is bound to, was read off a picture the window
     has since moved out of, so a click resolved from it would land somewhere else.
     """
-    labels = _read_json(_labels_path(hwnd))
-    if labels:
-        with _session.lock:
-            _session.labels = {
-                name: _target_from_record(item)
-                for name, item in (labels.get("labels") or {}).items()
-            }
-            _session.labels_hwnd = hwnd
-            _session.labels_rect = tuple(labels.get("rect") or ()) or None
+    _load_labels(hwnd)
     record = _read_json(_listing_path(hwnd))
     if not record:
         return None
@@ -2035,7 +2052,6 @@ def _action_shot(args: dict) -> str:
     frame, kind = _frame_for(hwnd)
     if frame is None:
         return kind
-    _session.remember(frame)
     title = ""
     if hwnd is not None:
         title = f" {_window_text(hwnd)!r}"
@@ -2049,7 +2065,7 @@ def _action_shot(args: dict) -> str:
             "\nFor small text, shot a single window: hwnd=<the one you care about>, or act "
             "directly with targets --hwnd ...."
         )
-    return _attach(summary, frame)
+    return _attach(summary, frame, f"shot-0x{hwnd:X}" if hwnd is not None else "shot")
 
 
 def _action_targets(args: dict) -> str:
@@ -2078,7 +2094,6 @@ def _action_targets(args: dict) -> str:
             "itself while it sits behind another window. Bring it to the front with "
             f"restore --hwnd {hwnd} and read it again."
         )
-    _session.remember(frame)
     # Drop what cannot be addressed: no name and no class means the model has
     # nothing to say about it (Chromium/Electron's anonymous shells), and a
     # pattern-less whole-client-area box is only a temptation to click blind.
@@ -2116,17 +2131,21 @@ def _action_targets(args: dict) -> str:
         shapes = [cand for cand in shapes if inside_client(hwnd, cand)]
         targets = _renumber([*found_a11y, *ocr, *shapes])
         note = _candidate_note(found_a11y, ocr, shapes, lead=f"self-drawn: {drawn}")
+    # The records are taken *before* the labels are laid over the names: a label is a display
+    # name for the model, while a number has to stay re-matchable against the window's live
+    # a11y tree — and a stored name of "ping" matches nothing there (measured 2026-09-17: the
+    # click that used a number from a labelled listing came back "target #8 ('ping') is not on
+    # screen any more").
+    records = [_target_record(cand) for cand in targets]
     if _session.labels_hwnd == hwnd and _session.labels_rect == window_rect(hwnd):
         for bound_name, bound in _session.labels.items():
             for cand in targets:
                 if cand.rect == bound.rect:
                     cand.name = bound_name  # the semantic name the model gave it
     with _session.lock:
-        _session.listings[hwnd] = Listing({cand.n: cand for cand in targets}, window_rect(hwnd))
-        # Bounded: a long session lists many windows, and a listing is only ever
-        # consumed by the next few calls (a drag reads two of them).
-        while len(_session.listings) > LISTINGS_MAX:
-            _session.listings.pop(next(iter(_session.listings)))
+        _session.listings[hwnd] = Listing(
+            {record["n"]: _target_from_record(record) for record in records}, window_rect(hwnd)
+        )
 
     title = _window_text(hwnd)
     head = f"TARGETS in hwnd=0x{hwnd:X} {title!r}{note} — pick one by number"
@@ -2136,7 +2155,7 @@ def _action_targets(args: dict) -> str:
         path = _data_file(f"targets-0x{hwnd:X}", ".png")
         _mark_targets(frame, targets).save(path, "PNG")
         frame_path = str(path)
-    listing_path = _write_listing(hwnd, targets, frame_path, note)
+    listing_path = _write_listing(hwnd, records, frame_path, note)
     summary = f"{head}\n{listing}\n[listing: {listing_path}]"
     if frame_path:
         summary += f"\n[numbered frame: {frame_path}]"
@@ -2514,15 +2533,37 @@ def _action_label(args: dict) -> str:
 
 # ── input actions: armed, verified, and stopping at the strike limit ───────
 
+def _strikes_path() -> Path:
+    return DATA_DIR / "strikes.json"
+
+
 def _strike(key: str) -> int:
+    """One more fruitless attempt at `key`, counted where the next call can see it.
+
+    It has to be on disk: a run performs exactly one action, so a counter in this process
+    could never reach `FAILURE_LIMIT` and the whole escalation would be decoration
+    (measured 2026-09-17). A run that gave up a while ago is not this run's evidence, so an
+    entry older than `STRIKE_WINDOW_S` starts the count over.
+    """
     with _session.lock:
-        _session.failures[key] = _session.failures.get(key, 0) + 1
-        return _session.failures[key]
+        book = _read_json(_strikes_path())
+        entry = book.get(key) if isinstance(book.get(key), dict) else {}
+        count = int(entry.get("count") or 0) + 1
+        if time.time() - float(entry.get("at") or 0) > STRIKE_WINDOW_S:
+            count = 1
+        book[key] = {"count": count, "at": round(time.time(), 3)}
+        # Bounded: a key names a window and a target, and only the recent few mean anything.
+        recent = dict(sorted(book.items(), key=lambda item: item[1].get("at", 0))[-40:])
+        _write_json(_strikes_path(), recent)
+        return count
 
 
 def _clear_strikes(key: str) -> None:
     with _session.lock:
-        _session.failures.pop(key, None)
+        book = _read_json(_strikes_path())
+        if book.pop(key, None) is not None:
+            _write_json(_strikes_path(), book)
+
 
 def _escalate(sink, key: str, what: str, detail: str, should_abort, on_answer, call_id) -> str:
     """The strike limit as a script: nobody to ask, nobody to answer.
@@ -2565,6 +2606,30 @@ def _guarded_input(hwnd: int) -> tuple[bool, str]:
             "elevated window (or one on another virtual desktop) cannot be driven from here."
         )
     return True, (f"  restored from {was}" if was != "normal" else "")
+
+
+def _raise_for_input(hwnd: int) -> str | None:
+    """Bring the window forward, and say why nothing may be typed if it cannot be.
+
+    Keys and characters go to whatever holds the *focus*, not to the window the caller named.
+    Injecting them while another window is in front types the caller's text into that window —
+    measured 2026-09-17: a selftest run reported "type" as done while the probe's Edit still
+    held its old text, and the characters had gone to whatever was in front (in that case the
+    terminal the tool was being driven from). A click is safe without this: `target_problem`
+    asks `WindowFromPoint` and refuses when the point belongs to another window. A keystroke
+    has no point to check, so the check has to be the foreground.
+
+    Shell surfaces are exempt: the desktop and the taskbar are never raised, by their own rule
+    (`_is_shell_surface`), and `key --keys win d` is exactly how a person asks for the desktop.
+    """
+    if _is_shell_surface(hwnd):
+        return None
+    if set_foreground(hwnd) or foreground_hwnd() == hwnd:
+        return None
+    return (
+        f"0x{hwnd:X} could not be brought to the foreground, and text and keys go to whatever "
+        "has the focus — nothing was injected. Bring the window forward (restore) and try again"
+    )
 
 
 def _action_click(args: dict, sink, should_abort, on_answer, call_id) -> str:
@@ -2626,8 +2691,6 @@ def _click_once(args, sink, should_abort, on_answer, call_id, *, clicks: int) ->
                 break
             time.sleep(0.2)
     after = grab_window(hwnd)
-    if after is not None:
-        _session.remember(after)
     focused = _focused()
     changed = _diff_ratio(before, after) if before is not None and after is not None else 0.0
     focus_hit = bool(focused) and target.name and target.name in focused.get("name", "")
@@ -2674,7 +2737,9 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str:
     ok, note = _guarded_input(hwnd)
     if not ok:
         return note
-    set_foreground(hwnd)
+    blocked = _raise_for_input(hwnd)
+    if blocked:
+        return f"ERROR: {blocked}"
     if wants and not awake:  # raised after the arm: measure the controls only now
         resolved = resolve_target(hwnd, args)
         if isinstance(resolved, str):
@@ -2703,8 +2768,6 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str:
     time.sleep(SETTLE_S)
     after_value, _where = _read_back_settled(hwnd, target)
     after_frame = grab_window(hwnd)
-    if after_frame is not None:
-        _session.remember(after_frame)
     changed = _diff_ratio(before_frame, after_frame) if before_frame and after_frame else 0.0
     key = f"type:{hwnd}:{target.label if target else where}"
     verified = text in after_value or after_value.strip() == text.strip()
@@ -2746,7 +2809,9 @@ def _action_key(args: dict, sink, should_abort, on_answer, call_id) -> str:
     ok, note = _guarded_input(hwnd)
     if not ok:
         return note
-    set_foreground(hwnd)
+    blocked = _raise_for_input(hwnd)
+    if blocked:
+        return f"ERROR: {blocked}"
     before_focus = _focused()
     before_value, _where = _read_back(hwnd, None)
     before_frame = grab_window(hwnd)
@@ -2757,8 +2822,6 @@ def _action_key(args: dict, sink, should_abort, on_answer, call_id) -> str:
     after_focus = _focused()
     after_value, _where = _read_back(hwnd, None)
     after_frame = grab_window(hwnd)
-    if after_frame is not None:
-        _session.remember(after_frame)
     changed = _diff_ratio(before_frame, after_frame) if before_frame and after_frame else 0.0
     focus_moved = bool(before_focus) and bool(after_focus) and before_focus != after_focus
     value_changed = after_value != before_value
@@ -2831,8 +2894,6 @@ def _action_scroll(args: dict, sink, should_abort, on_answer, call_id) -> str:
     time.sleep(SETTLE_S)
     rect = window_rect(hwnd)
     after_frame = grab_window(hwnd)
-    if after_frame is not None:
-        _session.remember(after_frame)
     changed = _diff_ratio(before_frame, after_frame) if before_frame and after_frame else 0.0
     verified = scrolled and changed > DIFF_THRESHOLD
     key = f"scroll:{hwnd}:{target.label}"
@@ -2989,8 +3050,6 @@ def _action_drag(args: dict, sink, should_abort, on_answer, call_id) -> str:
     dst_rect_after = window_rect(to_hwnd)
     after = _crop(grab_screen(), dst_rect_after) if dst_rect_after else None
     after_frame = grab_window(to_hwnd)
-    if after_frame is not None:
-        _session.remember(after_frame)
     value_after = ""
     if ends.target is not None:
         value_after, _ = _read_back_settled(to_hwnd, ends.target)
@@ -3567,8 +3626,6 @@ def _action_restore(args: dict) -> str:
     notes = wake_window(hwnd, via)
     now = window_state(hwnd)
     frame = grab_window(hwnd) if now == "normal" else None
-    if frame is not None:
-        _session.remember(frame)
     summary = (
         f"RESTORE hwnd=0x{hwnd:X} {_window_text(hwnd)!r} → {now}"
         f" (was {was}, named controls: {_named_a11y(hwnd) if now == 'normal' else 0})\n"
@@ -3581,12 +3638,21 @@ def _action_restore(args: dict) -> str:
 
 
 # ── the command line ───────────────────────────────────────────────────────
-_READ_ONLY_ACTIONS = {
+# Actions that need no window identity at all.
+_PLAIN_ACTIONS = {
     "windows": _action_windows,
     "shot": _action_shot,
-    "targets": _action_targets,
-    "label": _action_label,
 }
+# Read the stored listing back (the labels, and the numbers when they are still valid) but
+# inject nothing: `targets` scans afresh and prints the labels, `label` resolves `--target`
+# out of the numbers. Both ran before that read once, and a label then vanished between the
+# process that gave it and the one that listed (measured 2026-09-17).
+_LISTING_ONLY_ACTIONS = {"targets": _action_targets, "label": _action_label}
+# May inject, directly or through the wake path a window may need first. Only these are
+# refused when the input desktop is not this session's.
+_INJECTING_ACTIONS = frozenset(
+    {"click", "double_click", "drag", "type", "key", "scroll", "restore"}
+)
 _INPUT_ACTIONS = {
     "click": _action_click,
     "double_click": _action_double_click,
@@ -3627,13 +3693,14 @@ def _needs_listing(action: str, args: dict) -> bool:
 def _dispatch(args: dict) -> str:
     """One action, from the same `args` dictionary the tool used to take."""
     action = str(args.get("action") or "")
-    if action in _READ_ONLY_ACTIONS:
-        return _READ_ONLY_ACTIONS[action](args)
-    blocked = desktop_problem()
-    if blocked:
-        # Asked before anything is measured: with the lock screen up every action otherwise
-        # fails in its own way and blames itself (measured 2026-09-17).
-        return f"ERROR: {blocked}"
+    if action in _PLAIN_ACTIONS:
+        return _PLAIN_ACTIONS[action](args)
+    if action in _INJECTING_ACTIONS:
+        blocked = desktop_problem()
+        if blocked:
+            # Asked before anything is measured: with the lock screen up every action
+            # otherwise fails in its own way and blames itself (measured 2026-09-17).
+            return f"ERROR: {blocked}"
     hwnd = args.get("hwnd")
     if hwnd in (None, ""):
         return f"ERROR: {action} needs --hwnd <window id from windows>; identity is never guessed"
@@ -3655,6 +3722,8 @@ def _dispatch(args: dict) -> str:
             return stale
         if action == "restore":  # asks nothing, so it takes no ask plumbing
             return _action_restore(args)
+        if action in _LISTING_ONLY_ACTIONS:
+            return _LISTING_ONLY_ACTIONS[action](args)
         return _INPUT_ACTIONS[action](args, None, None, None, None)
     finally:
         # Belt and braces: no injection path may leave a key down or the left button held,
@@ -3768,8 +3837,8 @@ def _build_parser() -> argparse.ArgumentParser:
     drag.add_argument("--to-hwnd", dest="to_hwnd", type=_window_id, help="the destination window")
     drag.add_argument("--to-target", dest="to_target", type=int, help="drop point by number")
     drag.add_argument("--to-name", dest="to_name", help="drop point by visible text")
-    drag.add_argument("--dx", type=float, help="shift the drop point horizontally (pixels)")
-    drag.add_argument("--dy", type=float, help="shift the drop point vertically (pixels)")
+    drag.add_argument("--dx", type=int, help="shift the drop point horizontally (whole pixels)")
+    drag.add_argument("--dy", type=int, help="shift the drop point vertically (whole pixels)")
     drag.add_argument("--route", choices=("taskbar",), help="hover the destination's taskbar button")
     drag.add_argument("--button", choices=("left", "right"), default="left")
 
@@ -3851,11 +3920,21 @@ def _call(*argv: str, data: Path, timeout: float = 120.0) -> tuple[int, str]:
     return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
-def _start_probe(script: str, work: Path, name: str, checks: _Checks) -> tuple[subprocess.Popen, int] | None:
+def _start_probe(
+    script: str, work: Path, name: str, checks: _Checks, extra: tuple[str, ...] = ()
+) -> tuple[subprocess.Popen, int] | None:
     log = work / f"{name}.jsonl"
     hwnd_file = work / f"{name}.hwnd"
     proc = subprocess.Popen(
-        [sys.executable, _probe_script(script), "--log", str(log), "--hwnd-file", str(hwnd_file)]
+        [
+            sys.executable,
+            _probe_script(script),
+            "--log",
+            str(log),
+            "--hwnd-file",
+            str(hwnd_file),
+            *extra,
+        ]
     )
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -3917,17 +3996,92 @@ def _target_in(record: dict, *, cls: str = "", name: str = "") -> dict | None:
     return None
 
 
+LABEL_CHECK = "a label outlives the process that gave it"
+STALE_CHECK = "a number from a stale listing is refused, not guessed"
+CLICK_CHECK = "click reaches the button (the app logged WM_COMMAND)"
+LABEL_CLICK_CHECK = "a click by label reaches the same button (label read by a new process)"
+TYPE_CHECK = "type puts the characters in the control (read back from the control itself)"
+KEY_CHECK = "key presses land, and X replaces the Ctrl+A selection"
+SCROLL_CHECK = "scroll uses ScrollItemPattern"
+DRAG_MOVE_CHECK = "drag --from titlebar moves the window by the shift it was given"
+DRAG_SELECT_CHECK = "drag carries a selection the app reports (EM_GETSEL)"
+CANVAS_CHECK = "targets reads a canvas UI off the picture"
+# Everything that injects: it cannot even be attempted without a listing to name targets in.
 SKIPPED_WITHOUT_A_LISTING = (
-    "a number from a stale listing is refused, not guessed",
-    "click reaches the button (the app logged WM_COMMAND)",
-    "a label outlives the process that gave it",
-    "type puts the characters in the control (read back from the control itself)",
-    "key presses land, and X replaces the Ctrl+A selection",
-    "scroll uses ScrollItemPattern",
-    "drag --from titlebar moves the window by the shift it was given",
-    "drag carries a selection the app reports (EM_GETSEL)",
-    "targets reads a canvas UI off the picture",
+    STALE_CHECK,
+    CLICK_CHECK,
+    LABEL_CLICK_CHECK,
+    TYPE_CHECK,
+    KEY_CHECK,
+    SCROLL_CHECK,
+    DRAG_MOVE_CHECK,
+    DRAG_SELECT_CHECK,
+    CANVAS_CHECK,
 )
+# Everything that goes through `_INJECTING_ACTIONS`, and so is refused before anything can
+# be measured when the input desktop is not this session's.
+SKIPPED_WHILE_LOCKED = (
+    STALE_CHECK,
+    CLICK_CHECK,
+    LABEL_CLICK_CHECK,
+    TYPE_CHECK,
+    KEY_CHECK,
+    SCROLL_CHECK,
+    DRAG_MOVE_CHECK,
+    DRAG_SELECT_CHECK,
+)
+
+
+def _first_line(text: str) -> str:
+    stripped = text.strip()
+    return stripped.splitlines()[0][:110] if stripped else ""
+
+
+def _last_line(text: str) -> str:
+    stripped = text.strip()
+    return stripped.splitlines()[-1][:110] if stripped else ""
+
+
+def _verify_line(text: str) -> str:
+    """The tool's own verdict — "verified: …" or "unverified: …" — which says *why* a gesture
+    did not reach the control, and is the first thing to read when a check fails."""
+    for line in text.splitlines():
+        if "verify:" in line:
+            return line.strip()[:150]
+    return ""
+
+
+def _hold(checks: _Checks, hwnd: int, name: str) -> bool:
+    """Keep the probe in front for this one check, or say why it could not be.
+
+    Everything guarded here injects into whatever is *focused* or under the pointer. If another
+    window has come forward in the meantime (a person typing, the shell activating something),
+    the gesture would land there — so the check is skipped rather than aimed at the wrong
+    window (measured 2026-09-17: a run typed a test string into whatever held the foreground).
+    """
+    if foreground_hwnd() == hwnd or set_foreground(hwnd):
+        return True
+    checks.skip(name, "the probe lost the foreground: the machine is in use")
+    return False
+
+
+# The tool's own refusals that mean "the desktop moved under me", not "the tool is wrong": the
+# window could not be raised, or something else is at the point. They are the machine's answer,
+# so a check they interrupt is a SKIP — the alternative is a red row every time a person uses
+# their own computer (measured 2026-09-17, twice).
+_ENVIRONMENT_REFUSALS = (
+    "could not be brought to the foreground",
+    "could not raise the source window",
+    "belongs to",
+    "has no rectangle any more",
+)
+
+
+def _environment_refusal(out: str) -> str:
+    for phrase in _ENVIRONMENT_REFUSALS:
+        if phrase in out:
+            return phrase
+    return ""
 
 
 def _selftest_summary(checks: _Checks, work: Path, keep: bool) -> int:
@@ -3942,16 +4096,23 @@ def _selftest_summary(checks: _Checks, work: Path, keep: bool) -> int:
 
 
 def _selftest(keep: bool = False) -> int:
+    global DATA_DIR
     checks = _Checks()
     work = Path(tempfile.mkdtemp(prefix="athand-selftest-"))
     data = work / "data"
+    # The children are handed this through ATHAND_DIR; this process has to look in the same
+    # place, or it reads the listings of a directory nobody wrote to (measured, 2026-09-17).
+    DATA_DIR = data
     probes: list[tuple[subprocess.Popen, int]] = []
     try:
         locked = desktop_problem()
         if locked:
             print(f"NOTE  {locked}")
             print("NOTE  input-dependent checks cannot pass until the user is back.\n")
-        started = _start_probe("target.py", work, "target", checks)
+        # The probe is asked to be DPI-aware: with a user at the machine an unaware window is
+        # uncapturable the moment anything else takes the foreground, which made half of these
+        # checks fail for a reason that had nothing to do with the tool (measured 2026-09-17).
+        started = _start_probe("target.py", work, "target", checks, ("--dpi-aware",))
         if started is None:
             return 1
         probe, hwnd = started
@@ -3999,6 +4160,42 @@ def _selftest(keep: bool = False) -> int:
                 checks.skip(name, reason)
             return _selftest_summary(checks, work, keep)
 
+        # ── a label is stored where the next process can read it ───────────
+        code, out = _call(
+            "label", "--hwnd", hwnd, "--target", button["n"], "--label", "ping", data=data
+        )
+        _code, relisted_out = _call("targets", "--hwnd", hwnd, data=data)
+        relisted = _read_json(_listing_path(hwnd))
+        # The label is a *display* name: the next listing prints it over the button's own text,
+        # while the stored record keeps the name the program read (so its number stays
+        # re-matchable — see `_action_targets`).
+        shows = bool(re.search(r"'ping' cls=", relisted_out))
+        checks.check(
+            LABEL_CHECK,
+            code == 0 and shows,
+            f"label exit {code}; the next listing shows the label: {shows}",
+        )
+        button = _target_in(relisted, cls="Button") or button
+        edit = _target_in(relisted, cls="Edit") or edit
+
+        if locked:
+            # The dispatch refuses input actions before it ever consults the listing, so with
+            # the lock screen up these cannot run — and a check that could not run is a SKIP,
+            # not a pass.
+            for name in SKIPPED_WHILE_LOCKED:
+                checks.skip(name, "the machine is locked: nothing can be injected")
+            return _selftest_summary(checks, work, keep)
+
+        # Everything from here injects real input and takes the foreground — which is where the
+        # person who is using this machine loses theirs. Measured 2026-09-17: a run started
+        # seconds after the user came back failed half its checks (their windows kept coming
+        # forward over the probe) and stole focus from the terminal this tool was being driven
+        # from. If the probe cannot be raised, somebody else is working: say so and stop.
+        if not set_foreground(hwnd) or foreground_hwnd() != hwnd:
+            for name in SKIPPED_WHILE_LOCKED:
+                checks.skip(name, "the probe cannot hold the foreground: the machine is in use")
+            return _selftest_summary(checks, work, keep)
+
         # ── the listing is bound to where the window was ───────────────────
         rect = window_rect(hwnd) or (0, 0, 0, 0)
         _u32.SetWindowPos(
@@ -4007,66 +4204,113 @@ def _selftest(keep: bool = False) -> int:
         time.sleep(0.2)
         code, out = _call("click", "--hwnd", hwnd, "--target", button["n"], data=data)
         checks.check(
-            "a number from a stale listing is refused, not guessed",
+            STALE_CHECK,
             code == 2 and "targets --hwnd" in out,
-            out.strip().splitlines()[0][:90] if out.strip() else "",
+            _first_line(out),
         )
         _u32.SetWindowPos(hwnd, 0, rect[0], rect[1], 0, 0, SWP_NOSIZE | SWP_NOZORDER)
         time.sleep(0.2)
         _call("targets", "--hwnd", hwnd, data=data)
         listing = _read_json(_listing_path(hwnd))
-        button = _target_in(listing, cls="Button")
-        edit = _target_in(listing, cls="Edit")
+        button = _target_in(listing, cls="Button") or button
+        edit = _target_in(listing, cls="Edit") or edit
 
         # ── input: judged by what the application itself recorded ──────────
-        code, out = _call("click", "--hwnd", hwnd, "--target", button["n"], data=data)
-        commands = [e for e in _events(log) if e.get("ev") == "command" and e.get("id") == 102]
-        checks.check(
-            "click reaches the button (the app logged WM_COMMAND)",
-            code == 0 and "verified" in out and len(commands) == 1,
-            f"exit {code}; {len(commands)} command(s); title {_window_text(hwnd)!r}",
-        )
-        code, out = _call(
-            "label", "--hwnd", hwnd, "--target", button["n"], "--label", "ping", data=data
-        )
-        labelled = code == 0
-        code2, out2 = _call("click", "--hwnd", hwnd, "--name", "ping", data=data)
-        commands = [e for e in _events(log) if e.get("ev") == "command" and e.get("id") == 102]
-        checks.check(
-            "a label outlives the process that gave it",
-            labelled and code2 == 0 and "clicks=2" in _window_text(hwnd),
-            f"label exit {code}, click exit {code2}, {len(commands)} command(s) logged",
-        )
-        code, out = _call(
-            "type", "--hwnd", hwnd, "--target", edit["n"], "--text", "hello", "--char-delay", "0.05",
-            data=data,
-        )
-        edit_hwnd = int(_u32.FindWindowExW(hwnd, None, "Edit", None) or 0)
-        text = _window_text(edit_hwnd)
-        checks.check(
-            "type puts the characters in the control (read back from the control itself)",
-            code == 0 and "hello" in text,
-            f"exit {code}; the Edit now holds {text!r}",
-        )
-        _call("key", "--hwnd", hwnd, "--keys", "ctrl", "a", data=data)
-        code, out = _call(
-            "type", "--hwnd", hwnd, "--text", "X", "--char-delay", "0.05", data=data
-        )
-        text = _window_text(int(_u32.FindWindowExW(hwnd, None, "Edit", None) or 0))
-        checks.check(
-            "key presses land, and X replaces the Ctrl+A selection",
-            code == 0 and text == "X",
-            f"the Edit now holds {text!r}",
-        )
+        # Every check counts what the *probe* recorded before and after, so one failing gesture
+        # cannot make the next one look like a pass (the first run of this selftest did: the
+        # label click "failed" only because the earlier click had not landed).
+        def button_clicks() -> int:
+            return len(
+                [e for e in _events(log) if e.get("ev") == "command" and e.get("id") == 102]
+            )
+
+        def edit_text() -> str:
+            """What the *probe* says its Edit holds.
+
+            Read from the probe's own log, never from this process with `GetWindowText`: for a
+            control in another process that call hands back a stale title, so it would report a
+            working `type` as a failure (measured 2026-09-17).
+            """
+            values = [e.get("value", "") for e in _events(log) if e.get("ev") == "text"]
+            return str(values[-1]) if values else ""
+
+        def interrupted(name: str, code: int, out: str) -> bool:
+            """A check the desktop answered for: report it as skipped, with the tool's words."""
+            if code == 0:
+                return False
+            reason = _environment_refusal(out)
+            if not reason:
+                return False
+            checks.skip(name, f"the desktop moved under the probe ({reason}): {_first_line(out)}")
+            return True
+
+        if _hold(checks, hwnd, CLICK_CHECK):
+            before = button_clicks()
+            code, out = _call("click", "--hwnd", hwnd, "--target", button["n"], data=data)
+            landed = button_clicks() - before
+            if not interrupted(CLICK_CHECK, code, out):
+                checks.check(
+                    CLICK_CHECK,
+                    code == 0 and "verified" in out and landed == 1,
+                    f"exit {code}; the button logged {landed} click(s); {_first_line(out)}",
+                )
+        if _hold(checks, hwnd, LABEL_CLICK_CHECK):
+            before = button_clicks()
+            code, out = _call("click", "--hwnd", hwnd, "--name", "ping", data=data)
+            landed = button_clicks() - before
+            if not interrupted(LABEL_CLICK_CHECK, code, out):
+                checks.check(
+                    LABEL_CLICK_CHECK,
+                    code == 0 and landed == 1,
+                    f"exit {code}; the button logged {landed} click(s); {_first_line(out)}",
+                )
+        if _hold(checks, hwnd, TYPE_CHECK):
+            code, out = _call(
+                "type",
+                "--hwnd",
+                hwnd,
+                "--target",
+                edit["n"],
+                "--text",
+                "hello",
+                "--char-delay",
+                "0.05",
+                data=data,
+            )
+            text = edit_text()
+            if not interrupted(TYPE_CHECK, code, out):
+                if "hello" not in text and foreground_hwnd() != hwnd:
+                    checks.skip(TYPE_CHECK, "the foreground left the probe during the check")
+                else:
+                    checks.check(
+                        TYPE_CHECK,
+                        code == 0 and "hello" in text,
+                        f"exit {code}; the Edit now holds {text!r}; {_verify_line(out)}",
+                    )
+        if _hold(checks, hwnd, KEY_CHECK):
+            _call("key", "--hwnd", hwnd, "--keys", "ctrl", "a", data=data)
+            code, out = _call(
+                "type", "--hwnd", hwnd, "--text", "X", "--char-delay", "0.05", data=data
+            )
+            text = edit_text()
+            if not interrupted(KEY_CHECK, code, out):
+                if text != "X" and foreground_hwnd() != hwnd:
+                    checks.skip(KEY_CHECK, "the foreground left the probe during the check")
+                else:
+                    checks.check(
+                        KEY_CHECK,
+                        code == 0 and text == "X",
+                        f"the Edit now holds {text!r}; {_verify_line(out)}",
+                    )
         item = _target_in(listing, cls="ListItem") or _target_in(listing, name="项目")
         if item is None:
-            checks.skip("scroll uses ScrollItemPattern", "no list item in the listing")
+            checks.skip(SCROLL_CHECK, "no list item in the listing")
         else:
             code, out = _call("scroll", "--hwnd", hwnd, "--target", item["n"], data=data)
             checks.check(
-                "scroll uses ScrollItemPattern",
+                SCROLL_CHECK,
                 code == 0 and "ScrollItemPattern=used" in out,
-                out.strip().splitlines()[-1][:90] if out.strip() else "",
+                _last_line(out),
             )
         code, out = _call("release", data=data)
         checks.check("release lifts nothing when nothing is down", code == 0 and "RELEASE" in out)
@@ -4079,22 +4323,37 @@ def _selftest(keep: bool = False) -> int:
         probes.append(started)
         drag_log = work / "drag.jsonl"
         _call("targets", "--hwnd", drag_hwnd, data=data)
-        drag_listing = _read_json(_listing_path(drag_hwnd))
         before = window_rect(drag_hwnd) or (0, 0, 0, 0)
-        code, out = _call(
-            "drag", "--hwnd", drag_hwnd, "--from", "titlebar", "--dx", "60", "--dy", "40", data=data
-        )
-        after = window_rect(drag_hwnd) or (0, 0, 0, 0)
-        moved = (after[0] - before[0], after[1] - before[1])
-        checks.check(
-            "drag --from titlebar moves the window by the shift it was given",
-            code == 0 and abs(moved[0] - 60) <= 2 and abs(moved[1] - 40) <= 2,
-            f"moved {moved}, wanted (60, 40); exit {code}",
-        )
+        if _hold(checks, drag_hwnd, DRAG_MOVE_CHECK):
+            code, out = _call(
+                "drag",
+                "--hwnd",
+                drag_hwnd,
+                "--from",
+                "titlebar",
+                "--dx",
+                "60",
+                "--dy",
+                "40",
+                data=data,
+            )
+            after = window_rect(drag_hwnd) or (0, 0, 0, 0)
+            moved = (after[0] - before[0], after[1] - before[1])
+            if not interrupted(DRAG_MOVE_CHECK, code, out):
+                checks.check(
+                    DRAG_MOVE_CHECK,
+                    code == 0 and abs(moved[0] - 60) <= 2 and abs(moved[1] - 40) <= 2,
+                    f"moved {moved}, wanted (60, 40); exit {code}; {_first_line(out)}",
+                )
+        # The move above leaves the listing behind it: the tool refuses a number measured
+        # against where the window *was* (measured 2026-09-17 — that refusal is the point of the
+        # listing), so list the moved window again before naming its Edit.
+        _call("targets", "--hwnd", drag_hwnd, data=data)
+        drag_listing = _read_json(_listing_path(drag_hwnd))
         drag_edit = _target_in(drag_listing, cls="Edit")
         if drag_edit is None:
-            checks.skip("drag selects text inside a control", "the probe's Edit is not in the listing")
-        else:
+            checks.skip(DRAG_SELECT_CHECK, "the probe's Edit is not in the listing")
+        elif _hold(checks, drag_hwnd, DRAG_SELECT_CHECK):
             code, out = _call(
                 "drag", "--hwnd", drag_hwnd, "--target", drag_edit["n"], "--dx", "300", data=data
             )
@@ -4102,16 +4361,17 @@ def _selftest(keep: bool = False) -> int:
                 e["sel"] for e in _events(drag_log) if e.get("ev") == "selection" and e.get("sel")
             ]
             picked = [sel for sel in selections if sel[1] > sel[0]]
-            checks.check(
-                "drag carries a selection the app reports (EM_GETSEL)",
-                code == 0 and bool(picked),
-                f"exit {code}; selections seen {selections[-3:]}",
-            )
+            if not interrupted(DRAG_SELECT_CHECK, code, out):
+                checks.check(
+                    DRAG_SELECT_CHECK,
+                    code == 0 and bool(picked),
+                    f"exit {code}; selections seen {selections[-3:]}; {_first_line(out)}",
+                )
         _close_probe(drag_probe, drag_hwnd)
 
         # ── the third tier: a UI drawn in pixels ───────────────────────────
         if importlib.util.find_spec("rapidocr_onnxruntime") is None:
-            checks.skip("targets reads a canvas UI off the picture", "rapidocr is not installed")
+            checks.skip(CANVAS_CHECK, "rapidocr is not installed")
         else:
             canvas_log = work / "canvas.jsonl"
             canvas = subprocess.Popen(
@@ -4122,7 +4382,7 @@ def _selftest(keep: bool = False) -> int:
                 match = re.search(r"hwnd=(\d+).*'athand canvas probe'", out)
                 if match is None:
                     checks.check(
-                        "targets reads a canvas UI off the picture",
+                        CANVAS_CHECK,
                         False,
                         "the Tk probe did not show up in windows --include all",
                     )
@@ -4136,7 +4396,7 @@ def _selftest(keep: bool = False) -> int:
                         if item.get("source") == "visual"
                     ]
                     checks.check(
-                        "targets reads a canvas UI off the picture",
+                        CANVAS_CHECK,
                         code == 0 and bool(visual),
                         f"exit {code}; {len(visual)} candidate(s) cut out of the pixels",
                     )
@@ -4173,7 +4433,12 @@ def main(argv: list[str] | None = None) -> int:
         release_all_buttons()
         print(f"ERROR: {type(exc).__name__}: {exc}")
         raise
-    print(result)
+    try:
+        print(result)
+    except OSError:
+        # The reader went away (`athand.py windows | head`): Windows raises EINVAL rather than
+        # BrokenPipeError, and there is nowhere left to report anything anyway.
+        return 0
     return 2 if result.startswith(("ERROR:", "ESCALATED:")) else 0
 
 

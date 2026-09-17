@@ -96,7 +96,10 @@ The numbers belong to **one listing**: `%TEMP%\athand\<hwnd>.json` is written wi
 rectangle and the timestamp, and a later call that finds the window somewhere else **refuses**
 `--target` with "run `targets --hwnd N` again". Re-list; do not retry the old number.
 `--name` keeps working across a moved window (it is re-matched against the live a11y tree), and
-a label that is out of date refuses itself with its own message.
+a label that is out of date refuses itself with its own message. A `label` is a *display* name:
+the listing prints it over the candidate ('ping' where the button says 按下) while the stored
+record keeps the name the program read — so a number from a labelled listing still resolves, and
+`--name ping` reaches it through the label.
 
 If `targets` says a window **draws itself** (Chromium/Electron like QQ, Qt like WeChat), the
 picture *is* the tool face: read the text off the frame and pick the cut-out shapes by number.
@@ -114,7 +117,9 @@ whatever has the focus. Give the shapes you will need again a `label`.
    `Screen-saver`, `SendInput` fails with ERROR_ACCESS_DENIED, `GetCursorPos` fails,
    `GetForegroundWindow` returns 0 and the screen capture is empty. The script refuses input
    actions up front with that sentence instead of reporting "INJECTION FAILED". `windows`,
-   `targets` and window-level `shot` still work while locked (they use `PrintWindow`).
+   `targets`, `label` and a window-level `shot` still work while locked — through
+   `PrintWindow`, which means a **DPI-aware** window only; an unaware one has no foreground
+   window to be raised to, so it is refused (trap 3).
 3. **DPI**: a DPI-unaware window that is not in the foreground cannot be captured at all
    (`PrintWindow` returns a scaled stub — half black, every rect off by the scale factor). The
    tool refuses instead of showing you that stub. Bring the window forward (`restore`) and read
@@ -140,6 +145,14 @@ whatever has the focus. Give the shapes you will need again a `label`.
 10. **`--char-delay` is a real pace, not a knob to minimize**: 0.15s ≈ seven characters a
     second, the band the user asked for. 0.03 (33/s) makes text appear as if pasted, which is
     exactly what this tool exists not to do.
+11. **`type` and `key` refuse when the window cannot be brought forward**, and that is not
+    fussiness: characters and keystrokes go to whatever holds the *focus*, not to the window you
+    named, so injecting them from behind another window types your text into that window
+    (measured 2026-09-17 — a selftest run reported a `type` as done while the control never
+    changed, and the text had gone to the terminal driving the tool). A `click` needs no such
+    guard: `target_problem` asks `WindowFromPoint` and refuses when the point belongs to
+    something else. `key --keys win d` still works with nothing raised — the desktop and the
+    taskbar are exempt, by their own rule.
 
 ## `unverified` and `ESCALATED`
 
@@ -161,5 +174,12 @@ frame diff). Three outcomes:
 `python athand.py selftest` starts the probes in `probes/` and checks every gesture against what
 the probe *itself* recorded (the `WM_COMMAND` a button sent, the `EM_GETSEL` an edit reported,
 the window rectangle the OS gives back). `--keep` keeps the work directory with the JSONL logs,
-the PNGs and the listings. Checks that cannot run are reported `SKIP` with the reason, never as
-a pass — including "the machine is locked".
+the PNGs and the listings. A check that cannot run is reported `SKIP` with its reason, never as a
+pass — "the machine is locked" and "the probe cannot hold the foreground: the machine is in use"
+are the two that matter.
+
+It **injects real input and takes the foreground**, so run it when the desktop is yours. The
+foreground guard exists because of a measured run: started seconds after the user came back, half
+its checks failed (their windows kept coming forward over the probe) and it stole focus from the
+terminal it was being driven from. If the probe cannot be raised the checks skip instead of
+fighting the person for the keyboard.

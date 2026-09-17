@@ -8,6 +8,7 @@ the selftest checks instead of believing the tool's own summary.
     python probes/target.py --log %TEMP%\\athand-target.jsonl --hwnd-file %TEMP%\\athand-target.hwnd
 """
 
+import contextlib
 import ctypes
 import json
 import os
@@ -34,6 +35,14 @@ CLASS = "AthandTargetProbe"
 EDIT, BUTTON, STATIC, LIST = 101, 102, 103, 104
 count = {"clicks": 0}
 
+if "--dpi-aware" in sys.argv:
+    # Off by default: a DPI-unaware probe is the common real-world target, and it is what
+    # exercises the tool's "unaware and behind another window" refusal. With no foreground
+    # window to be raised to (a locked session) that probe cannot be captured at all, so the
+    # selftest asks for an aware one instead — its pixels come from PrintWindow either way.
+    with contextlib.suppress(Exception):
+        u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+
 u.CreateWindowExW.restype = wt.HWND
 u.CreateWindowExW.argtypes = [
     wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
@@ -42,6 +51,8 @@ u.CreateWindowExW.argtypes = [
 ]
 u.GetDlgItem.restype = wt.HWND
 u.GetDlgItem.argtypes = [wt.HWND, ctypes.c_int]
+u.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+u.GetWindowTextLengthW.argtypes = [wt.HWND]
 u.SetWindowTextW.argtypes = [wt.HWND, wt.LPCWSTR]
 u.SetWindowTextW.restype = wt.BOOL
 u.SendMessageW.restype = wt.LPARAM
@@ -66,6 +77,21 @@ def log(event: dict) -> None:
         fh.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def read_edit(hwnd) -> str:
+    """The Edit's text as *this* process reads it.
+
+    A reader outside the process cannot get this: `GetWindowText` on another process's control
+    hands back whatever title it was last told, so a test that asks from outside sees stale text
+    while the typing worked (measured 2026-09-17 — two red rows against a working tool). The
+    application's own account is the only one worth checking against.
+    """
+    edit = u.GetDlgItem(hwnd, EDIT)
+    length = u.GetWindowTextLengthW(edit)
+    buf = ctypes.create_unicode_buffer(length + 1)
+    u.GetWindowTextW(edit, buf, length + 1)
+    return buf.value
+
+
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, wt.HWND, ctypes.c_uint, wt.WPARAM, wt.LPARAM)
 
 
@@ -73,6 +99,8 @@ def wndproc(hwnd, msg, wparam, lparam):
     if msg == 0x0111:  # WM_COMMAND
         cid, code = wparam & 0xFFFF, (wparam >> 16) & 0xFFFF
         log({"ev": "command", "id": cid, "code": code})
+        if cid == EDIT and code == 0x0300:  # EN_CHANGE: what the control now holds
+            log({"ev": "text", "value": read_edit(hwnd)})
         if cid == BUTTON and code == 0:  # BN_CLICKED
             count["clicks"] += 1
             u.SetWindowTextW(u.GetDlgItem(hwnd, STATIC), f"clicks={count['clicks']}")
