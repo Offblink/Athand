@@ -141,6 +141,8 @@ python skills/athand/probes/desktop_door_check.py     # 约 25 秒，退出时�
 要改 `athand.py` 的人请先读 [`skills/athand/NOTES.md`](skills/athand/NOTES.md)：18 行判据的逐项名字、
 基线怎么刷新、两条守卫与三条门的实现细节，以及只在改工具时才会咬人的那些坑（`Win+D` 会把探针一起
 最小化、跨进程读 `Edit` 是假的、清理只能按窗口类名……）。
+和另一个同类工具的对照实测（同一台机器、同一个任务，逐字输入 / 打开桌面文件 / 托盘唤醒 / 拖文件进微信）
+记在 [`COMPARISON.md`](COMPARISON.md)。
 
 ## 边界
 
