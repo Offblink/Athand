@@ -98,7 +98,7 @@ skills/athand/
   SKILL.md      给 agent 的说明书（流程、规则、坑）
   NOTES.md      改这个工具时的开发/验证笔记（探针、18 行判据、基线、两条守卫、三条门、踩过的坑）
   athand.py     整个工具：windows targets shot label click double-click drag
-                type key scroll restore release selftest
+                type key scroll restore decider release selftest
   probes/
     target.py               Win32 窗口（Edit / Button / Static / 60 项 ListBox），收到的每条消息都记进
                             JSONL —— selftest 拿它自己的记录对账 —— 并且能穿上"门"所依赖的形态：
