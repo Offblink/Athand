@@ -2017,8 +2017,10 @@ def _decider_config() -> dict:
         gitignored; the repo never carries one)
 
     Keys: `url` (a resident service), `serve` (how to start it), `ask` (a one-shot process),
-    `weights` (a path that must exist for the seam to be on at all), `k`, `policy`, `timeout`,
-    `wait`, `autostart`. `_source` and `_problem` are filled in for the report.
+    `weights` (a path that must exist for the seam to be on at all), `k`, `timeout`, `wait`,
+    `autostart`. `policy` is deliberately not one of them: it belongs to the decider, comes back
+    over `/health` and is forwarded with every request (see `_decider_ask`).
+    `_source` and `_problem` are filled in for the report.
     """
     raw = os.environ.get("ATHAND_DECIDER", "")
     source = "ATHAND_DECIDER"

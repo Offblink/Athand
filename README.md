@@ -63,6 +63,33 @@ decider**（另一个程序提供的模型服务）去挑 —— 没配、或者
 `--target`/`--name` 照旧。athand 自己不跑模型、不认识任何模型，也不带任何模型（口径见
 [`skills/athand/SKILL.md`](skills/athand/SKILL.md) 的「`--intent`」一节）。
 
+**参考实现**：[BiXian](https://github.com/Offblink/BiXian) —— 同一个作者的本地决策服务（4-bit 的小视觉模型，
+从编号清单里挑一个号），它就是为这个接缝写的。下面只是 README 的推荐：**代码里没有任何模型的名字**，
+接缝认的只是 `decider.json` 里那几个字段，换谁来实现都行。两者之间只有 HTTP 和一条启动命令，
+没有 import，也没有共享环境——模型那一侧的运行时和显存完全留在对面。
+
+在 `athand.py` 旁边放一个 `decider.json`（或者把同一份 JSON 给 `$ATHAND_DECIDER`，那份可以只作用于一次调用）：
+
+```json
+{
+  "url": "http://127.0.0.1:8111",
+  "serve": ["<BiXian 的 venv>/python.exe", "<BiXian>/vlm-probe/decider.py", "serve", "--port", "8111"],
+  "weights": "<BiXian>/models/qwen3vl-4b",
+  "k": 9
+}
+```
+
+字段就这些：`url`（常驻服务的地址）、`serve`（没人应答时怎么把它起起来）、`ask`（一次性命令，每次现开）、
+`weights`（**开关**：这个路径不在盘上，整个接缝就关掉，并说清它找的是哪个路径）、`k`（问几个候选）、
+`timeout`、`wait`、`autostart`。阈值/策略不在这里给：decider 自己的策略随它的 `/health` 回来，
+athand 每次请求都带上它。`decider.json` 里有本机路径，所以它**不在仓库里**
+（`.gitignore` 着），别人 clone 下来得到的是一个没有 decider 的 athand —— 行为跟以前一模一样。
+想知道这台机器现在被指到了什么：
+
+```bash
+python skills/athand/athand.py decider
+```
+
 ## 两条规则
 
 1. **触手可及**：屏幕上够得着的东西优先。文件/程序的图标或行在屏幕上，就 `double-click` 它，别去写
