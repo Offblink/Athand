@@ -63,19 +63,21 @@ afterwards. **Look at that path** before deciding the action worked.
 |---|---|
 | `windows [--include visible\|all]` | the window list |
 | `shot [--hwnd N]` | PNG of the whole screen, or of one window; prints the path |
+| `decider [--start \| --stop] [--hwnd N --intent TEXT]` | the decision service this box may name numbers with: its state, start/stop, or one question asked without clicking |
 | `targets --hwnd N` | number this window's controls + draw the numbers on a picture |
 | `label --hwnd N --target K --label TEXT` | name a shape that has no text, so `--name TEXT` finds it later |
-| `click` / `double-click --hwnd N (--target K \| --name TEXT) [--button left\|right]` | `double-click` is the "open" gesture |
-| `drag --hwnd N [--target K \| --name TEXT \| --from titlebar] [--to-hwnd M] [--to-target K \| --to-name TEXT] [--dx PX] [--dy PX] [--route taskbar]` | carry something with the button held down |
-| `type --hwnd N [--target K \| --name TEXT] --text S [--char-delay S]` | text, one character at a time; the clipboard is never touched |
+| `click` / `double-click --hwnd N (--target K \| --name TEXT \| --intent TEXT) [--button left\|right]` | `double-click` is the "open" gesture |
+| `drag --hwnd N [--target K \| --name TEXT \| --intent TEXT \| --from titlebar] [--to-hwnd M] [--to-target K \| --to-name TEXT] [--dx PX] [--dy PX] [--route taskbar]` | carry something with the button held down |
+| `type --hwnd N [--target K \| --name TEXT \| --intent TEXT] --text S [--char-delay S]` | text, one character at a time; the clipboard is never touched |
 | `key --hwnd N --keys ctrl s` | a key or a combination |
-| `scroll --hwnd N (--target K \| --name TEXT)` | scroll a control into view |
+| `scroll --hwnd N (--target K \| --name TEXT \| --intent TEXT)` | scroll a control into view |
 | `restore --hwnd N [--via auto\|window\|shell]` | bring a minimized / tray-resident window back |
 | `release` | lift every button and key this machine still has down (after a kill) |
 | `selftest [--keep]` | drive the bundled probes and check every gesture against what the app recorded |
 
 `--hwnd 4653616` and `--hwnd 0x470230` are the same window. Exit codes: `0` ran, `2` refused
-(the text starts with `ERROR:` or `ESCALATED:` — nothing was sent or nothing was verified).
+(the text starts with `ERROR:`, `UNDECIDED:` or `ESCALATED:` — nothing was sent, or nothing was
+verified, or the number could not be named at all).
 
 ## What `drag` is for
 
@@ -125,6 +127,47 @@ picture *is* the tool face: read the text off the frame and pick the cut-out sha
 OCR names are approximate (`drag_source.txt` reads as `drag_source. txt`), numbers are not. To
 type into such a window, click the box first, then `type` with no `--target` — it types into
 whatever has the focus. Give the shapes you will need again a `label`.
+
+## `--intent`: when nobody can name the number
+
+A number has to come from somewhere. Normally you read the numbered frame and pick one — that is
+the design. Two cases have no number to give: the caller cannot read a picture, or several
+controls answer to the same name. `--intent "点击发送按钮"` says what the gesture is *for*, and the
+number is then asked of a **decider** — a local model this box may have been pointed at. athand
+ships no model and knows none: it knows where one may be configured.
+
+```bash
+python skills/athand/athand.py click --hwnd 4653616 --intent "点击发送按钮"
+python skills/athand/athand.py type  --hwnd 4653616 --intent "搜索框" --text "发票"
+python skills/athand/athand.py decider                                        # what this box is pointed at
+python skills/athand/athand.py decider --hwnd 4653616 --intent "点击发送按钮"   # ask; click nothing
+```
+
+**The weights are the switch.** A config (`decider.json` beside `athand.py`, or `$ATHAND_DECIDER`
+holding the same JSON) names `url` (a resident service on loopback) and/or `ask` (a one-shot
+command), plus `weights` (a path). If those weights are not on this disk the seam is **off**:
+
+* every `--intent` is refused, and the refusal names the path it looked for;
+* `--target=<n>` and `--name=<text>` keep working exactly as before — nothing else changes.
+
+If the config says how to start the service (`serve`) and it is not answering, athand starts it
+(detached, log in `%TEMP%\athand\decider.log`) and waits for the weights — measured once at 28s
+(warm page cache) / 44s (cold), then 1-2s per question — and the result says how long it waited.
+
+What crosses the seam is a question, a numbered list, and a picture: no window, no listing, no
+paths of athand's (`NOTES.md` has the wire). Three consequences:
+
+* **`UNDECIDED` is a hand-off, not a guess.** Below its own threshold the decider declines, prints
+  its ranking, and names the picture it looked at (`…marked.png`, numbered the way *it* numbered
+  the options). Read that picture and pass `--target <n>` yourself — the same hand-off
+  `unverified`/`ESCALATED` already teach.
+* **Which number it named is in the result**: `CLICK #8 [Invoke] '按下' … via decider p=1.00
+  conf=1.00`. A wrong pick is then visible as data rather than as a mystery (the model is right
+  most of the time and *says when it is not* — the measured 4B never picked wrong at high
+  confidence, it dropped to p≈0.2, which is exactly what `UNDECIDED` is for).
+* **It never writes to the caller's numbering.** The decider draws its own 1..K over the picture it
+  is shown and maps back through the ids athand sent, so a number printed in a listing means what
+  it always meant.
 
 ## Traps that cost real time (all measured on this box)
 
@@ -246,6 +289,16 @@ your screen — one shortcut on the desktop and a `win d`:
 
 ```bash
 python probes/desktop_door_check.py     # ~25s, writes and removes one .lnk, puts your windows back
+```
+
+The **decider seam has its own check too**, and it needs no model at all: a stub decider answers
+the same way every time, so what is checked is the seam — the question that reaches the decider,
+the number athand then acts on, and that every kind of "no" (nothing configured, weights missing,
+nothing listening, a malformed config, `UNDECIDED`, an id that is not in the list) arrives
+**before** anything is injected. Real clicks land on its own probe window and nowhere else:
+
+```bash
+python probes/decider_check.py          # needs no model; ~5min on this box
 ```
 
 It is not in `selftest` for exactly that reason; it was run twice on 2026-09-17 (all checks

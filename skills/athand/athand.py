@@ -46,6 +46,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -86,6 +88,17 @@ TYPE_CHAR_DELAY_S = 0.15  # 逐字输入: the gap between characters — a *watc
 # second) is a blur: the text appears as if it had been pasted, which is the thing this
 # style exists to avoid. The knob stays — `char_delay` overrides it per call (spec §37).
 LAUNCH_WAIT_S = 3.0  # a gesture that starts a process: its window is not up immediately
+# The decider seam (see "the decider seam" below): the numbers, and why each one is that number.
+DECIDER_FILE = "decider.json"  # beside this script; not in the repo, it names local paths
+# Measured: a listing carries the window's own shell (2x2 px) and its render host (an a11y box
+# over the whole client area) as candidates. Drawn over for a decider, those two take 0.58/0.42
+# of the answer and leave the row the task is about at 1e-6 — so neither is ever asked about.
+DECIDER_MIN_SIDE_PX = 8
+DECIDER_MAX_AREA_SHARE = 0.5
+DECIDER_WAIT_S = 300.0  # a cold model reads 713 weight shards before its first answer
+DECIDER_HANDSHAKE_S = 3.0  # how long "are you there" waits before it counts as a no
+CREATE_NO_WINDOW = 0x08000000  # a background child gets no console of its own
+CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 _u32 = ctypes.WinDLL("user32", use_last_error=True)
 _gdi = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -902,6 +915,10 @@ class Target:
     rect: tuple[int, int, int, int]
     patterns: tuple[str, ...] = ()
     source: str = "a11y"
+    # Who named this number, when it was not the caller: "" for `target=`/`name=`, and the
+    # decider's own words (its probability and confidence) when it read the listing instead.
+    # Only ever set on a candidate the decider just named — the listing on disk never carries it.
+    via: str = ""
 
     @property
     def center(self) -> tuple[int, int]:
@@ -916,8 +933,10 @@ class Target:
             kind = f"[{'+'.join(self.patterns)}]" if self.patterns else "[text]"
             name = self.name or self.cls or "(unnamed)"
         number = f"#{self.n} " if self.n else ""  # a label carries no listing number
+        chosen = f" via {self.via}" if self.via else ""
         return (
-            f"{number}{kind} {name!r} cls={self.cls or '-'} rect={self.rect} centre={self.center}"
+            f"{number}{kind} {name!r} cls={self.cls or '-'} rect={self.rect} "
+            f"centre={self.center}{chosen}"
         )
 
 
@@ -1864,18 +1883,23 @@ def _load_listing(hwnd: int) -> str | None:
 
 # ── target resolution: the model names one, the program locates it ─────────
 def resolve_target(hwnd: int, args: dict, *, allow_ocr: bool = True) -> Target | str:
-    """Turn `target=<n>` or `name=<text>` into a rectangle in screen space.
+    """Turn `target=<n>`, `name=<text>` or `intent=<what this is for>` into a rectangle.
 
     Ambiguity is surfaced, never guessed: several matches come back as a list
     for the model to pick from (the prototype's "don't silently take the first"
-    rule). A name with no match is `no_target`, with the a11y candidates listed.
+    rule) — unless this machine has a decider configured, which is asked to pick among them
+    instead. A name with no match is `no_target`, with the a11y candidates listed.
     """
     number = args.get("target")
     name = str(args.get("name") or "").strip()
+    intent = str(args.get("intent") or "").strip()
     if number is None and not name:
+        if intent:
+            return _decider_resolve(hwnd, intent)
         return (
-            "ERROR: pass target=<number from targets> or name=<visible text>. "
-            "Call the targets action first to see the numbers."
+            "ERROR: pass target=<number from targets>, name=<visible text>, or intent=<what this "
+            "gesture is for> — the last one asks a decider, when this machine has one (see "
+            "`athand.py decider`). Call the targets action first to see the numbers."
         )
     pairs = _scan(hwnd)
     if number is not None:
@@ -1933,6 +1957,17 @@ def resolve_target(hwnd: int, args: dict, *, allow_ocr: bool = True) -> Target |
         return hits[0]
     if len(hits) > 1:
         listed = "\n".join(cand.label for cand in hits[:12])
+        if intent:
+            # What the number-free form of a name cannot do: several controls answer to it, and
+            # taking the first is the kind of guess this tool does not make. The decider is asked
+            # instead — and if it declines, the ambiguity is still surfaced rather than resolved.
+            frame = grab_window(hwnd)
+            if frame is not None:
+                picked, why = _decider_pick(hwnd, intent, hits, frame,
+                                            what=f"the control called {name!r}")
+                if picked is not None:
+                    return picked
+                return f"{why}\n  It had to choose among these:\n{listed}"
         return f"ERROR: {len(hits)} controls match {name!r} — pick a number with target=\n{listed}"
     if allow_ocr:
         frame = grab_window(hwnd)
@@ -1951,6 +1986,326 @@ def resolve_target(hwnd: int, args: dict, *, allow_ocr: bool = True) -> Target |
     known = _session.labels if _session.labels_hwnd == hwnd else {}
     tail = f" Labels you set here: {', '.join(sorted(known))}." if known else ""
     return f"ERROR: no_target: nothing named {name!r} in this window.{tail} Candidates:\n{listed}"
+
+
+# ── the decider seam: when this machine has a model, the model names the number ──
+# The tool's own position does not change: coordinates are still not the caller's, and every
+# gesture still names a target the *program* located. What changes is who reads the listing —
+# instead of the caller picking a number out of it, a model may pick it, and athand asks one
+# only when this machine says there is one to ask (a config, and the weights it names on disk).
+#
+# Nothing here knows what model it is talking to. The wire is one JSON object in and one out:
+#
+#     {"intent": "...", "options": [{"id": 12, "label": "发送", "box": [x0,y0,x1,y1]}],
+#      "image": "<png path>"}                              # the picture, our own numbering drawn
+#     -> {"decision": "YES"|"UNDECIDED", "id": 12, "p": 0.97, "confidence": 0.95,
+#         "options": [...], "marked": "<png path>"}
+#
+# and the decider is a program athand starts or calls, never an import: the model's runtime (torch,
+# a venv, a GPU) stays entirely on the other side. Every failure here is a reason *string*, never
+# an exception: a seam that is only supposed to help must not be able to break a run.
+class DeciderDown(RuntimeError):
+    """The decider cannot answer right now — carrying the reason, which is the useful part."""
+
+
+def _decider_config() -> dict:
+    """The decision service this machine is pointed at — `{}` when there is none.
+
+    Two sources, in this order, both the same JSON:
+      * `ATHAND_DECIDER` — for a caller that wants to point this box somewhere else for one run
+      * `decider.json` beside this script — the box's own file (it names local paths, so it is
+        gitignored; the repo never carries one)
+
+    Keys: `url` (a resident service), `serve` (how to start it), `ask` (a one-shot process),
+    `weights` (a path that must exist for the seam to be on at all), `k`, `policy`, `timeout`,
+    `wait`, `autostart`. `_source` and `_problem` are filled in for the report.
+    """
+    raw = os.environ.get("ATHAND_DECIDER", "")
+    source = "ATHAND_DECIDER"
+    if not raw.strip():
+        path = Path(__file__).resolve().parent / DECIDER_FILE
+        if not path.is_file():
+            return {}
+        raw, source = path.read_text(encoding="utf-8"), str(path)
+    try:
+        config = json.loads(raw)
+    except ValueError as exc:
+        return {"_source": source, "_problem": f"{source} is not valid JSON: {exc}"}
+    if not isinstance(config, dict):
+        return {"_source": source, "_problem": f"{source} is not a JSON object"}
+    if not config:
+        return {}  # an empty object is "off", exactly like no file at all
+    config["_source"] = source
+    return config
+
+
+def _decider_health(base: str, timeout: float = DECIDER_HANDSHAKE_S) -> dict | None:
+    """What the service says about itself, or None when nothing answers there."""
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/health", timeout=timeout) as reply:
+            return json.loads(reply.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _decider_post(base: str, path: str, payload: dict, timeout: float) -> dict:
+    """One POST, JSON out. Raises `DeciderDown` with whatever the other end said."""
+    call = urllib.request.Request(
+        base.rstrip("/") + path,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(call, timeout=timeout) as reply:
+            return json.loads(reply.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        said = exc.read().decode("utf-8", "replace")[:300]
+        raise DeciderDown(f"the decider refused the request: {said}") from exc
+    except (OSError, ValueError) as exc:
+        raise DeciderDown(f"the decider call failed: {exc}") from exc
+
+
+def _decider_launch(cfg: dict) -> None:
+    """Start the decider as a process of its own — it has to outlive this call.
+
+    Every athand call is a fresh process, so a child that dies with it would pay the model's
+    whole load on every gesture (measured: 29-44 s of a ~56 s one-shot answer). Detached instead:
+    no console of its own (`CREATE_NO_WINDOW` — the venv's python.exe is a redirector that spawns a
+    second process, and a child with no console to inherit is given one), its own process group,
+    stdin closed, and the log in the data directory where the next run can read why it never came
+    up.
+    """
+    argv = [str(item) for item in cfg["serve"]]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    log = open(DATA_DIR / "decider.log", "ab")  # noqa: SIM115 — the child holds this handle
+    with contextlib.suppress(OSError):
+        subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            close_fds=True,
+            creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+        )
+
+
+def _decider_ready(cfg: dict, base: str) -> tuple[dict | None, str]:
+    """(health, note): the service is up and answering, or None when it never did.
+
+    A decider that is up but still reading its weights is waited for here rather than reported:
+    the wait is the model's load, it happens once, and the alternative — asking a caller to come
+    back later — is a state a script cannot remember.
+    """
+    started = False
+    health = _decider_health(base)
+    if health is None and cfg.get("serve") and cfg.get("autostart", True):
+        _decider_launch(cfg)
+        started = True
+
+    def done(seen: dict | None) -> bool:
+        return bool(seen) and (seen.get("loaded") or seen.get("load_error")
+                               or seen.get("model_present") is False)
+
+    if done(health):
+        return health, ""
+    began = time.monotonic()
+    deadline = began + float(cfg.get("wait") or DECIDER_WAIT_S)
+    while time.monotonic() < deadline:
+        health = _decider_health(base)
+        if done(health):
+            break
+        time.sleep(0.5)
+    waited = f"{time.monotonic() - began:.0f}s"
+    if started and done(health):
+        return health, f"; started it and waited {waited} for the weights"
+    if started:
+        return health, f"; started it but it was not ready after {waited}"
+    return health, ""
+
+
+def _decider_ask(cfg: dict, request: dict) -> dict:
+    """One request over whichever transport this machine configured. Raises `DeciderDown`."""
+    base = str(cfg.get("url") or "").strip()
+    timeout = float(cfg.get("timeout") or 120.0)
+    if base:
+        health, note = _decider_ready(cfg, base)
+        if health is None:
+            raise DeciderDown(f"nothing answers at {base}{note} — start it, or fix the url")
+        if health.get("model_present") is False:
+            raise DeciderDown(f"the decider at {base} has no weights ({health.get('model')})")
+        if health.get("load_error"):
+            raise DeciderDown(f"the decider at {base} could not load: {health['load_error']}")
+        if not health.get("loaded"):
+            raise DeciderDown(f"the decider at {base} is still loading{note}")
+        request = dict(request)
+        if not request.get("policy") and health.get("policy"):
+            request["policy"] = health["policy"]
+        return _decider_post(base, "/decide", request, timeout)
+    argv = cfg.get("ask")
+    if not argv:
+        raise DeciderDown("the config has neither `url` nor `ask` — nothing to send a request to")
+    try:
+        done = subprocess.run(
+            [str(item) for item in argv],
+            input=json.dumps(request, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DeciderDown(f"the decider process did not run: {exc}") from exc
+    for line in reversed((done.stdout or "").splitlines()):
+        try:
+            answer = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(answer, dict):
+            return answer
+    raise DeciderDown(f"the decider printed no JSON (exit {done.returncode})")
+
+
+def _intent_overlap(intent: str, name: str) -> int:
+    """How many character pairs the intent and a candidate's name share.
+
+    Only a tie-break for "more candidates than the decider can be asked about at once", and only
+    ever used to decide *who gets asked*: the model still sees athand's own order, because the
+    order on screen is what a person reads the screen by.
+    """
+    if len(name) < 2:
+        return 0
+    left = {intent[i:i + 2] for i in range(len(intent) - 1)}
+    right = {name[i:i + 2] for i in range(len(name) - 1)}
+    return len(left & right)
+
+
+def _decider_candidates(candidates: list[Target], frame: Frame, k: int, intent: str) -> list[Target]:
+    """Which candidates are worth drawing a number on — athand's own order, at most k of them.
+
+    The picture is what the model reads, so unnamed candidates stay: a canvas button is a
+    legitimate answer here (that is what this seam buys over a text-only decision). What goes is
+    what poisons the question instead of adding to it, both measured on a real frame: the window's
+    own shell (a 2x2 px `Qt51514QWindowIcon`) and its render host (an a11y box over the whole
+    client area). Drawn over, the model spent 0.58/0.42 on those two and left the row the task was
+    about at 1e-6. Only what is *asked about* is filtered here — the listing is untouched.
+    """
+    window = window_rect(frame.hwnd) if frame.hwnd else None
+    area = ((window[2] - window[0]) * (window[3] - window[1])) if window else 0
+    keep: list[Target] = []
+    for cand in candidates:
+        left, top, right, bottom = cand.rect
+        width, height = right - left, bottom - top
+        if width < DECIDER_MIN_SIDE_PX or height < DECIDER_MIN_SIDE_PX:
+            continue
+        if window and (right <= window[0] or left >= window[2]
+                       or bottom <= window[1] or top >= window[3]):
+            continue
+        if cand.source == "a11y" and area and (width * height) / area >= DECIDER_MAX_AREA_SHARE:
+            continue
+        keep.append(cand)
+    if len(keep) > k:
+        keep = sorted(sorted(keep, key=lambda c: (-_intent_overlap(intent, c.name), c.n))[:k],
+                      key=lambda c: c.n)
+    return keep
+
+
+def _decider_undecided(intent: str, asked: list[Target], answer: dict, what: str) -> str:
+    """The hand-off: no number is invented, and the caller gets what it needs to answer itself."""
+    if answer.get("error"):
+        return f"ERROR: the decider refused the request: {answer['error']}"
+    best = float(answer.get("p") or 0.0)
+    ranking = "\n".join(
+        f"    #{row.get('id')} {row.get('label') or '(no name)'} p={float(row.get('p') or 0):.3f}"
+        for row in (answer.get("options") or [])[:6]
+    )
+    look = (
+        f" It looked at {answer['marked']} — the same picture, numbered 1..{len(asked)} by it."
+        if answer.get("marked") else ""
+    )
+    return (
+        f"UNDECIDED: the decider is not sure what {what} is for ({intent!r}) — its best was "
+        f"p={best:.3f}, under the {answer.get('threshold')} it needs.{look}\n"
+        f"  Read that picture and pass --target <n> for the one you pick; its ranking, with "
+        f"athand's own numbers, was:\n{ranking}"
+    )
+
+
+def _decider_pick(hwnd: int, intent: str, candidates: list[Target], frame: Frame,
+                  *, what: str = "this gesture") -> tuple[Target | None, str]:
+    """Ask the configured decider which candidate this gesture is for.
+
+    `(target, "")` when one was named, `(None, message)` otherwise — and the message is already
+    the thing to hand back to the caller, saying which kind of "no" it is: not configured, not
+    on this disk, not answering, or not sure.
+    """
+    cfg = _decider_config()
+    if cfg.get("_problem"):
+        return None, f"ERROR: {cfg['_problem']}"
+    if not cfg:
+        return None, (
+            "ERROR: no decider is configured on this machine, so intent= cannot name a number. "
+            "Write decider.json beside this script (or set ATHAND_DECIDER); `athand.py decider` "
+            "reports what this box is pointed at."
+        )
+    weights = str(cfg.get("weights") or "")
+    if weights and not Path(weights).exists():
+        return None, (
+            f"ERROR: the decider's model is not on this disk ({weights}, named by "
+            f"{cfg['_source']}) — pass target= or name=, or point the config at a model that is."
+        )
+    try:
+        k = int(cfg.get("k") or 9)
+    except (TypeError, ValueError):
+        k = 9
+    asked = _decider_candidates(candidates, frame, k, intent)
+    if not asked:
+        return None, (
+            "ERROR: nothing in this listing is worth asking a decider about — every candidate is "
+            "the window itself (or outside it). Run targets again, or pass target=/name=."
+        )
+    image = _data_file(f"decider-0x{hwnd:X}", ".png")
+    frame.image.save(image, "PNG")
+    request = {
+        "intent": intent,
+        "options": [
+            {"id": cand.n, "label": cand.name, "box": list(frame.to_local(cand.rect))}
+            for cand in asked
+        ],
+        "image": str(image),
+    }
+    try:
+        answer = _decider_ask(cfg, request)
+    except DeciderDown as exc:
+        return None, f"ERROR: {exc}"
+    chosen = next((cand for cand in asked if str(cand.n) == str(answer.get("id"))), None)
+    if answer.get("decision") != "YES" or chosen is None:
+        return None, _decider_undecided(intent, asked, answer, what)
+    chosen.via = (f"decider p={float(answer.get('p') or 0):.2f} "
+                  f"conf={float(answer.get('confidence') or 0):.2f}")
+    return chosen, ""
+
+
+def _decider_resolve(hwnd: int, intent: str) -> Target | str:
+    """`intent=` instead of a number: build the listing if it is not there yet, then ask."""
+    if _load_listing(hwnd):
+        made = _action_targets({"hwnd": hwnd})
+        if str(made).startswith("ERROR"):
+            return made
+        if _load_listing(hwnd):
+            return "ERROR: could not list this window to ask a decider about it"
+    listing = _session.listings.get(hwnd)
+    if listing is None:
+        return "ERROR: no listing to ask about — run targets first"
+    frame = grab_window(hwnd)
+    if frame is None:
+        return (
+            f"ERROR: could not capture window 0x{hwnd:X} — a decider is shown the picture, so "
+            "there is nothing to ask until it can be read (restore --hwnd and retry)."
+        )
+    picked, message = _decider_pick(hwnd, intent, list(listing.candidates.values()), frame)
+    return picked if picked is not None else message
+
 
 # ── read-only actions ─────────────────────────────────────────────────────
 def _windows_report(limit: int = 20, include_hidden: bool = False) -> str:
@@ -2157,6 +2512,77 @@ def _action_targets(args: dict) -> str:
     if frame_path:
         summary += f"\n[numbered frame: {frame_path}]"
     return summary
+
+
+def _decider_state(base: str, health: dict | None) -> str:
+    """One line about a decider that is (or is not) answering, plus anything wrong with it."""
+    if health is None:
+        return f"  service: nothing answers at {base}"
+    line = (f"  service: loaded={health.get('loaded')} loading={health.get('loading')} "
+            f"load_s={health.get('load_s')} requests={health.get('requests')} "
+            f"edge={health.get('edge')} k={health.get('k')} policy={health.get('policy')}")
+    if health.get("load_error"):
+        line += f"\n  load error: {health['load_error']}"
+    if health.get("model_present") is False:
+        line += "\n  the service has no weights: every intent= is refused"
+    return line
+
+
+def _action_decider(args: dict) -> str:
+    """What this machine's decider is, and whether it can be used right now.
+
+    The seam's own command: read the state before a gesture depends on it, start it once instead
+    of paying its load on the first gesture, stop it (which gives the card back), or ask it a
+    question with `--intent --hwnd` and act on nothing.
+    """
+    cfg = _decider_config()
+    if cfg.get("_problem"):
+        return f"ERROR: {cfg['_problem']}"
+    if not cfg:
+        return (
+            "DECIDER: none on this machine\n"
+            "  looked for: $ATHAND_DECIDER, then decider.json beside athand.py\n"
+            "  effect: intent= is refused; target=<n> and name=<text> are the ways to name a "
+            "gesture\n"
+            "  to attach one: write decider.json (see SKILL.md) — athand is not pointed at any "
+            "model by itself"
+        )
+    base = str(cfg.get("url") or "").strip()
+    weights = str(cfg.get("weights") or "")
+    lines = ["DECIDER", f"  config: {cfg['_source']}"]
+    lines.append(f"  transport: http {base}" if base else
+                 f"  transport: process {cfg.get('ask') or '(none: no url and no ask)'}")
+    if weights:
+        present = Path(weights).exists()
+        lines.append(f"  weights: {'present' if present else 'MISSING'} — {weights}")
+        if not present:
+            lines.append("  effect: every intent= is refused with that path; target=/name= still work")
+    if args.get("stop"):
+        if not base:
+            return "\n".join([*lines, "  --stop: needs a `url` in the config (nothing to stop)"])
+        try:
+            _decider_post(base, "/shutdown", {}, 10.0)
+        except DeciderDown as exc:
+            return "\n".join([*lines, f"  ERROR: {exc}"])
+        return "\n".join([*lines, "  stopped: it is shutting down (its port and its card are freed)"])
+    if args.get("start"):
+        if not (base and cfg.get("serve")):
+            return "\n".join([*lines, "  --start: needs both `url` and `serve` in the config"])
+        health, note = _decider_ready(cfg, base)
+        lines.append(_decider_state(base, health) + note)
+    elif base:
+        lines.append(_decider_state(base, _decider_health(base)))
+    intent = str(args.get("intent") or "").strip()
+    if intent:
+        hwnd = args.get("hwnd")
+        if not hwnd:
+            return "\n".join([*lines, "  ERROR: --intent needs --hwnd to ask about a window"])
+        lines.append(f"  asked: {intent!r} (nothing is clicked)")
+        resolved = _decider_resolve(int(hwnd), intent)
+        lines.append(f"  answer: {resolved.label}" if isinstance(resolved, Target)
+                     else f"  {resolved}")
+    return "\n".join(lines)
+
 
 def covering_window(point: tuple[int, int]) -> int:
     """The top-level window a click at this point would actually reach; 0 if none.
@@ -2723,7 +3149,8 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str:
     text = str(args.get("text") or "")
     if not text:
         return "ERROR: type needs text=<the string to enter>"
-    wants = args.get("target") is not None or bool(args.get("name"))
+    wants = (args.get("target") is not None or bool(args.get("name"))
+             or bool(str(args.get("intent") or "").strip()))
     awake = window_state(hwnd) == "normal"
     target: Target | None = None
     if wants and awake:
@@ -3654,6 +4081,7 @@ def _action_restore(args: dict) -> str:
 _PLAIN_ACTIONS = {
     "windows": _action_windows,
     "shot": _action_shot,
+    "decider": _action_decider,  # no window and no gesture: its own state, --start/--stop/--intent
 }
 # Read the stored listing back (the labels, and the numbers when they are still valid) but
 # inject nothing: `targets` scans afresh and prints the labels, `label` resolves `--target`
@@ -3782,6 +4210,11 @@ def _window_id(text: str) -> int:
 def _target_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target", type=int, help="candidate number from a targets listing")
     parser.add_argument("--name", help="the control's visible text instead of a number")
+    parser.add_argument(
+        "--intent",
+        help="what this gesture is for, when it is for something the caller cannot name; with no "
+        "--target, the number is asked of this machine's decider (see the decider command)",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -3804,6 +4237,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     shot = subs.add_parser("shot", help="write a PNG of the whole screen, or of one window")
     shot.add_argument("--hwnd", type=_window_id)
+
+    decider = subs.add_parser(
+        "decider",
+        help="the decision service this machine may name numbers with (state, --start, --stop)",
+    )
+    decider.add_argument("--intent", help="ask it which candidate an intent is for (nothing is clicked)")
+    decider.add_argument("--hwnd", type=_window_id, help="the window --intent is about")
+    decider.add_argument("--start", action="store_true", help="start it and wait for the weights")
+    decider.add_argument("--stop", action="store_true", help="ask it to shut down")
 
     targets = subs.add_parser(
         "targets", help="number this window's controls and draw the numbers on a picture"
@@ -4535,7 +4977,7 @@ def main(argv: list[str] | None = None) -> int:
         # The reader went away (`athand.py windows | head`): Windows raises EINVAL rather than
         # BrokenPipeError, and there is nowhere left to report anything anyway.
         return 0
-    return 2 if result.startswith(("ERROR:", "ESCALATED:")) else 0
+    return 2 if result.startswith(("ERROR:", "ESCALATED:", "UNDECIDED:")) else 0
 
 
 if __name__ == "__main__":

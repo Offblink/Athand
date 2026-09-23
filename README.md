@@ -44,18 +44,24 @@ python skills/athand/athand.py restore --hwnd 4653616    # 从最小化/托盘�
 |---|---|
 | `windows [--include visible\|all]` | 窗口表（`all` 加上最小化/隐藏窗口、通知区、桌面） |
 | `shot [--hwnd N]` | 整屏或单窗口的 PNG，打印路径 |
+| `decider [--start \| --stop] [--hwnd N --intent 意图]` | 这台机器可能被指到的决策服务：看状态、起停、或只问不点 |
 | `targets --hwnd N` | 给这个窗口里的控件编号，并把号码画在图上 |
 | `label --hwnd N --target K --label 文字` | 给没有文字的形状起个名，之后 `--name 文字` 找得到 |
-| `click` / `double-click --hwnd N (--target K \| --name 文字) [--button left\|right]` | `double-click` 就是"打开"手势 |
+| `click` / `double-click --hwnd N (--target K \| --name 文字 \| --intent 意图) [--button left\|right]` | `double-click` 就是"打开"手势 |
 | `drag --hwnd N … [--to-hwnd M] [--to-target K \| --dx/--dy PX] [--route taskbar]` | 按住左键搬运 |
-| `type --hwnd N [--target K \| --name 文字] --text 文字 [--char-delay S]` | 逐字输入，**永不碰剪贴板** |
+| `type --hwnd N [--target K \| --name 文字 \| --intent 意图] --text 文字 [--char-delay S]` | 逐字输入，**永不碰剪贴板** |
 | `key --hwnd N --keys ctrl s` | 一个键，或一个组合键 |
-| `scroll --hwnd N (--target K \| --name 文字)` | 把控件滚进视野 |
+| `scroll --hwnd N (--target K \| --name 文字 \| --intent 意图)` | 把控件滚进视野 |
 | `restore --hwnd N [--via auto\|window\|shell]` | 把最小化/托盘里的窗口叫回来 |
 | `release` | 松开这台机器上还按着的一切按键与按钮（被 kill 之后用） |
 | `selftest [--keep]` | 拉起探针，逐项对账（`--keep` 留下工作目录） |
 
-退出码：`0` 执行了；`2` 被拒绝（正文以 `ERROR:` 或 `ESCALATED:` 开头，什么都没发出去）。
+退出码：`0` 执行了；`2` 被拒绝（正文以 `ERROR:`、`UNDECIDED:` 或 `ESCALATED:` 开头，什么都没发出去）。
+
+`--intent` 是给"给不出号码"的调用方的：说清这个手势**是为了干什么**，号码交给**这台机器上配好的
+decider**（另一个程序提供的模型服务）去挑 —— 没配、或者它说的权重不在这台机器上，`--intent` 就被拒绝，
+`--target`/`--name` 照旧。athand 自己不跑模型、不认识任何模型，也不带任何模型（口径见
+[`skills/athand/SKILL.md`](skills/athand/SKILL.md) 的「`--intent`」一节）。
 
 ## 两条规则
 
@@ -100,6 +106,7 @@ skills/athand/
     drag_probe.py           SetCapture 路径日志 + EM_GETSEL + WM_DROPFILES
     canvas_probe2.py        一个 Tk canvas：两个控件画在像素里，a11y 里都没有
     desktop_door_check.py   第三条门，单跑：桌面上建一个快捷方式 + `win d`
+    decider_check.py        `--intent` 决策接缝，单跑：自带假 decider，不需要模型
     drag_probe.sample.jsonl, drag_source.txt   一条录下来的拖动路径，和一个用来拖的文件
 ```
 
@@ -116,7 +123,7 @@ pip install -r requirements.txt      # pillow, comtypes, numpy, rapidocr-onnxrun
 
 这一节说的是**怎么自证**，不是使用的前提：不跑它也能用（`windows → targets → act` 照走，每个动作自己会打印
 `verify:` 和实拍帧）。它是**改动这个工具时的回归账**——仓库里没有 CI、没有单元测试，探针就是唯一的判据，
-改了 `athand.py` 却不跑这两条，等于没验。
+改了 `athand.py` 却不跑这几条，等于没验。
 
 ```bash
 python skills/athand/athand.py selftest [--keep]
@@ -132,8 +139,18 @@ OS 给回的窗口矩形、应用自己被点了托盘图标时打的 `trayclick
 python skills/athand/probes/desktop_door_check.py     # 约 25 秒，退出时无残留
 ```
 
+决策接缝（`--intent`）也有自己的一条，而且**不需要任何模型**：它自带一个每次都答同样的假 decider，
+所以检查的是接缝本身——问到了什么、athand 拿哪个编号去动作、以及每一种"不行"（没配 / 权重不在 /
+没人应答 / 配置坏 / `UNDECIDED` / 回来一个不在选项里的 id）是不是都发生在**注入之前**。真实点击只落在
+它自己拉起的探针窗口上：
+
+```bash
+python skills/athand/probes/decider_check.py          # 约 5 分钟（每个会点击的行都是一次真实扫描+注入）
+```
+
 基线（2026-09-17，Windows 11 26200）：`selftest` **18/18、exit 0、无 SKIP**；
 `desktop_door_check` **6/6、无残留**；锁屏时跑，只读项 6/6、注入项 `SKIP` 并打印原因。
+`decider_check` **28/28、exit 0**（2026-09-23），`selftest` 同日 18/18（改完接缝复跑）。
 真机用例：驱动一个 **Qt 自绘**的聊天客户端（a11y 里什么都没有）——托盘图标把窗口叫回来 → 按 OCR 编号
 点开一个联系人 → 把桌面上的一个文件拖进输入框 → 逐字打 140 个字（0.15 s/字）→ 点发送；每一步都读回
 实拍帧确认。

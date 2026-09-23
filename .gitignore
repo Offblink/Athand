@@ -1,2 +1,4 @@
 __pycache__/
 *.py[cod]
+# This box's decider seam: it names local paths (a model, a venv), so it is never committed.
+skills/athand/decider.json

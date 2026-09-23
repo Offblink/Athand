@@ -12,6 +12,7 @@ check *are* the regression account, and they are the only oracle that can falsif
 ```bash
 python skills/athand/athand.py selftest [--keep]        # ~45s, real input, takes the foreground
 python skills/athand/probes/desktop_door_check.py       # ~25s, builds and removes a desktop shortcut
+python skills/athand/probes/decider_check.py            # ~5min, the --intent seam, needs no model
 ```
 
 Baseline, 2026-09-17 on Windows 11 26200: `selftest` **18/18, exit 0, no SKIP** on two consecutive
@@ -38,6 +39,8 @@ overrides it, and it names the whole directory):
 | `<hwnd>.json` | the numbered listing, the window rectangle it was cut from, the timestamp, the numbered-frame path, and `records` — the names the program itself read |
 | `<hwnd>.labels.json` | what `label` named: a semantic name → the stored record (with its rectangle) |
 | `targets-0x<..>-*.png`, `shot-0x<..>-*.png`, `frame-*.png` | the pictures, path printed on stdout for the caller to read |
+| `decider-0x<..>-*.png` | the bare window shot handed to a decider (`intent=` only — the numbered one would double-number) |
+| `decider.log` | a decider athand started itself: why it never came up, and its load line |
 | `strikes.json` | strike counts, **across processes**, with a ten-minute window |
 
 The listing's `records` must be taken **before** any label is applied. A label rewrites the stored
@@ -64,6 +67,62 @@ gesture, and a per-process counter resets every time.
    `type` as done while the text had gone to the terminal driving the tool). Clicks need no such
    guard: `target_point` asks `WindowFromPoint` and refuses when the point belongs to something
    else. The desktop and the taskbar are exempt from the guard by their own rule.
+
+## The decider seam (`--intent`)
+
+`resolve_target` has a third way in: `intent=<what the gesture is for>`, when there is no number
+and no name to give. It is the only part of the tool that can talk to a model, and it is built so
+that a model can never be required: `--target` and `--name` do not go near it, nothing imports a
+model, and every failure on that path comes back as a *string* (`_decider_pick` returns
+`(None, "ERROR: …")`), never an exception. A seam that is only supposed to help must not be able
+to break a run.
+
+The wire (one JSON object each way, in a file the profile above calls the contract):
+
+```
+-> {"intent": "点击按下按钮", "image": "<bare png path>",
+    "options": [{"id": 8, "label": "按下", "box": [540, 377, 720, 416]}]}   # box: image pixels
+<- {"decision": "YES", "id": 8, "index": 1, "p": 1.0, "confidence": 1.0,
+    "threshold": 0.5, "marked": "<png with its own 1..K drawn on it>", "options": [...]}
+```
+
+- **The `id` is athand's own candidate number**, and it comes back untouched. The decider draws
+  **its own 1..K** over the picture because its readout is a softmax over the tokens `"1".."9"` —
+  a real listing numbers into the dozens, and `27` is two tokens. So the two numberings never have
+  to agree, and a number printed in a listing keeps meaning what it always meant.
+- **The picture is the bare window shot** (`grab_window(hwnd)`), never the numbered frame `targets`
+  writes: two sets of numbers on one picture is a picture nobody can read. Boxes go through
+  `frame.to_local()` — athand's rectangles are screen coordinates and the picture is the window.
+- **The option set is filtered before it is asked** (`_decider_candidates`): the window's own shell
+  (a 2x2px `Qt51514QWindowIcon`) and its render host (an a11y box over the whole client area) are
+  dropped, because drawn over they took 0.58/0.42 of the answer and left the row the task was
+  about at 1e-6. Unnamed candidates are *kept* — a canvas button is a legitimate answer here; the
+  filter is about poisoning, not about names. The listing on disk is untouched.
+- **Cheap gates first, and all of them before anything is injected.** The number is resolved before
+  `_guarded_input`, so "no decider configured", "the weights are not on this disk", "nothing
+  answers at <url>" and "the config is not JSON" all leave the machine exactly as it was.
+- **The weights path is the switch**, deliberately: `weights` is read by athand, and a path that
+  does not exist turns the whole seam off with a message naming it. That is also what keeps the
+  tool honest about a box with no model: `decider` says so in one line.
+- **A detached child has to be started with `CREATE_NO_WINDOW`.** The venv's `python.exe` is a
+  redirector that spawns a second process; a grandchild with no console to inherit is given one.
+  `CREATE_NEW_PROCESS_GROUP` + `stdin=DEVNULL` + both streams into `decider.log` complete it. It
+  has to outlive the call at all — every athand call is a fresh process, so a child that dies with
+  it would pay the model's load on every gesture (measured: 29-44 s of a ~56 s one-shot answer,
+  and 1.0-1.6 s per question once resident).
+- **`--intent` with no listing builds one** (`_decider_resolve` calls `_action_targets`), which is
+  also why the answer's numbers match what a separate `targets` call would print. The listing it
+  writes is a real one, so a later `--target` call works off it.
+- **`UNDECIDED` exits 2 and says everything needed to finish by hand**: the ranking, and the path of
+  the picture the decider looked at. That is the two-tier hand-off again — the small model declining
+  costs a bigger model, never a coin flip.
+
+Every one of those is a row in `probes/decider_check.py` (which needs no model: its own `--stub`
+mode is the decider). Measured 2026-09-23 against a real local model (Qwen3-VL-4B, 4-bit, over
+loopback) on the probe window: `#8 [Invoke] '按下' … via decider p=1.00 conf=1.00`, then the
+click, and the probe logged its own `WM_COMMAND id=102` — the button did receive it; the gates
+left the probe's click count unchanged. The model's own lifecycle (`decider --start/--stop`, the
+weights really loading in 28-43s) is not in the check — it needs a real model on the box.
 
 ## The selftest, row by row
 
