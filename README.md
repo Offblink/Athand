@@ -16,7 +16,7 @@ server, no package to install.*
 一个窗口里往往有几十个能点的东西：按钮、菜单项、列表行、图标。要找到"那个"，模型给的坐标偏 15–68 px
 （实测），在 18 px 的目标上等于抛硬币。
 
-athand 把它变成**选择题**：程序把能点的东西**编号**，调用方只需要说"点 8 号"。
+athand 把它变成**选择题**：程序把能点的东西**编号**，你只需要说"点 8 号"。
 
 ## 用起来长这样
 
@@ -24,7 +24,7 @@ athand 把它变成**选择题**：程序把能点的东西**编号**，调用�
 
 ```bash
 pip install -r requirements.txt                          # pillow / comtypes / numpy / rapidocr-onnxruntime
-python skills/athand/athand.py windows                   # 这台机器上有哪些窗口
+python skills/athand/athand.py windows                   # 你机器上有哪些窗口
 python skills/athand/athand.py targets --hwnd 4653616    # 这个窗口的控件编号 + 画了号码的 PNG
 python skills/athand/athand.py click   --hwnd 4653616 --target 3
 python skills/athand/athand.py type    --hwnd 4653616 --name "搜索" --text "你好"
@@ -32,7 +32,7 @@ python skills/athand/athand.py drag    --hwnd 4653616 --target 7 --dx 300
 python skills/athand/athand.py restore --hwnd 4653616    # 从最小化/托盘里叫回来（走应用自己的门）
 ```
 
-`4653616` 是**那台机器上**那个窗口的编号（`hwnd`，系统给的窗口句柄），在你机器上是别的数字 ——
+上面这个 `4653616` 只是示例（`hwnd` = 系统给窗口的编号，也叫句柄）：在你机器上会是别的数字，
 先跑 `windows` 拿你自己的。认窗口靠这个编号，**不靠标题**（标题会变）。
 
 `windows` 打出来是这样：
@@ -60,12 +60,12 @@ TARGETS in hwnd=0x11009A0 'athand target clicks=0' — pick one by number
 [numbered frame: %TEMP%\athand\targets-0x11009A0-20260923-131743-22e8.png]
 ```
 
-（这是仓库自带的一个测试窗口上的原样输出：`#5` 以前、`#11` 以后的行略掉了，本机临时目录写成了
+（这是仓库自带的一个测试窗口上的原样输出：`#5` 以前、`#11` 以后的行略掉了，路径里的临时目录写成了
 `%TEMP%`。`cls=Button` 那一列是系统给它的类名。）
 
 最后两行是这次调用落在盘上的两样东西：一份**清单**（编号、矩形、它的名字），和一张
 **把号码画在截图上的图** —— 图是给人（和视觉模型）看的，清单是给程序用的。
-于是 `click --target 8` 的意思就是"点清单里的 8 号"：**位置由程序算，不由调用方给**。
+于是 `click --target 8` 的意思就是"点清单里的 8 号"：**位置由程序算，不用你给**。
 
 还是那个窗口，`click --target 8` 打出来是这样（同一个会话，逐字）：
 
@@ -88,7 +88,7 @@ CLICK #8 [Invoke] '按下' cls=Button rect=(1002, 377, 1182, 416) centre=(1092, 
 |---|---|
 | `windows [--include visible\|all]` | 窗口表（`all` 加上最小化/隐藏窗口、通知区、桌面） |
 | `shot [--hwnd N]` | 整屏或单窗口的 PNG，打印路径 |
-| `decider [--start \| --stop] [--hwnd N --intent 意图]` | 这台机器可能被指到的决策服务：看状态、起停、或只问不点 |
+| `decider [--start \| --stop] [--hwnd N --intent 意图]` | 你机器上可能配好的决策服务：看状态、起停、或只问不点 |
 | `targets --hwnd N` | 给这个窗口里的控件编号，并把号码画在图上 |
 | `label --hwnd N --target K --label 文字` | 给没有文字的形状起个名，之后 `--name 文字` 找得到 |
 | `click` / `double-click --hwnd N (--target K \| --name 文字 \| --intent 意图) [--button left\|right]` | `double-click` 就是"打开"手势 |
@@ -97,8 +97,8 @@ CLICK #8 [Invoke] '按下' cls=Button rect=(1002, 377, 1182, 416) centre=(1092, 
 | `key --hwnd N --keys ctrl s` | 一个键，或一个组合键 |
 | `scroll --hwnd N (--target K \| --name 文字 \| --intent 意图)` | 把控件滚进视野 |
 | `restore --hwnd N [--via auto\|window\|shell]` | 把最小化/托盘里的窗口叫回来 |
-| `release` | 松开这台机器上还按着的一切按键与按钮（被 kill 之后用） |
-| `selftest` | 装完先跑一次：它拉起自带窗口，把每个手势验一遍，告诉你这台机器上哪些能用 |
+| `release` | 松开你机器上还按着的一切按键与按钮（被 kill 之后用） |
+| `selftest` | 装完先跑一次：它拉起自带窗口，把每个手势验一遍，看哪些能在你这台机器上用 |
 
 退出码：`0` 执行了；`2` 被拒绝（正文以 `ERROR:`、`UNDECIDED:` 或 `ESCALATED:` 开头，什么都没发出去）。
 
@@ -111,15 +111,15 @@ pip install -r requirements.txt      # pillow, comtypes, numpy, rapidocr-onnxrun
 `rapidocr-onnxruntime` 那一层负责"读自绘界面上的字"（什么叫自绘见下）。它默认装，但代码当它可选：
 没装它的环境会**少掉 OCR 这一档并说出来**，而不是 import 就崩。
 
-装完跑一次 `python skills/athand/athand.py selftest`：18 项全过就说明这台机器上行；跑不了的项会报
+装完跑一次 `python skills/athand/athand.py selftest`：18 项全过就说明你这台机器上行；跑不了的项会报
 `SKIP` 并说明原因（比如"机器锁着"），不会瞒成通过。
 
 ## 给不出号码的时候：`--intent`
 
-号码得有人来给。正常情况是你自己看那张编号图、挑一个 —— 这就是设计。有两种情况给不出来：
-调用方读不了图，或者好几个控件叫同一个名字。`--intent "点击发送按钮"` 是给它们的：说清这个手势
-**是为了干什么**，号码交给**这台机器上配好的 decider**（另一个程序提供的模型服务）去挑 ——
-没配、或者它说的权重不在这台机器上，`--intent` 就被拒绝，`--target`/`--name` 照旧。
+号码得有人来给。正常情况是你自己看那张编号图、挑一个 —— 这就是设计。有两种情况你给不出来：
+你没看图（比如让模型去读），或者好几个控件叫同一个名字。`--intent "点击发送按钮"` 是给它们的：说清这个手势
+**是为了干什么**，号码交给**你机器上配好的 decider**（另一个程序提供的模型服务）去挑 ——
+没配、或者它说的权重不在你机器上，`--intent` 就被拒绝，`--target`/`--name` 照旧。
 athand 自己不跑模型、不认识任何模型，也不带任何模型（口径见
 [`skills/athand/SKILL.md`](skills/athand/SKILL.md) 的「`--intent`」一节）。
 
@@ -142,9 +142,10 @@ athand 自己不跑模型、不认识任何模型，也不带任何模型（口�
 字段就这些：`url`（常驻服务的地址）、`serve`（没人应答时怎么把它起起来）、`ask`（一次性命令，每次现开）、
 `weights`（**开关**：这个路径不在盘上，整个接缝就关掉，并说清它找的是哪个路径）、`k`（问几个候选）、
 `timeout`、`wait`、`autostart`。阈值/策略不在这里给：decider 自己的策略随它的 `/health` 回来，
-athand 每次请求都带上它。`decider.json` 里有本机路径，所以它**不在仓库里**
-（`.gitignore` 着），别人 clone 下来得到的是一个没有 decider 的 athand —— 行为跟以前一模一样。
-想知道这台机器现在被指到了什么：
+athand 每次请求都带上它。这个文件**不在仓库里**（它写的是你机器上的路径，`.gitignore` 了）——
+你 clone 下来拿到的是一个还没接 decider 的 athand：`--intent` 会被拒绝，并告诉你"没有配 decider"；
+`--target` / `--name` 照常。
+想知道你机器现在被指到了什么：
 
 ```bash
 python skills/athand/athand.py decider
@@ -181,22 +182,22 @@ python skills/athand/athand.py decider
   下一次调用把清单读回来 —— 这也是为什么窗口动过之后编号会失效。
 - **它没有人可问**：做不下去的时候它是打印一行说明就停手（`ESCALATED: …`，exit 2），
   不会弹权限框、也不会等你回答。**运行它就是同意**。
-- **坐标轮不到调用方给**（见上）。
+- **坐标轮不到你给**（见上）。
 
 ## 它做不到的
 
-- **只有 Windows**。架构能移植，实测数据不能——那些阈值都是这台机器上量出来的。
+- **只有 Windows**。架构能移植，实测数据不能——那些阈值都是在某一台具体机器上量出来的。
 - **提权窗口（UAC 安全桌面）够不着**：UIPI 是硬边界，不是缺口。工具会如实报，别硬试。
 - **锁屏时什么都注入不了**：输入桌面是 `Screen-saver` 时 `SendInput` 全部失败；`windows`/`targets`/
   窗口级 `shot` 照常，工具报的是机器状态而不是"工具坏了"。
 - **读它的输出走管道时设 `PYTHONIOENCODING=utf-8`**：脚本自己不选编码，Windows 子进程 stdout 不是控制台时
-  按系统代码页写（本机 `gbk`），UTF-8 的读者会看到乱码。
+  按系统代码页写（中文 Windows 上是 `gbk`），按 UTF-8 去读就会乱码。
 - **`type` / `key` 要求目标窗口真在前台**，否则拒绝：字和键只跟焦点走，不跟窗口走。
 - **动作一律是真实注入，不走无障碍触发（UIA Invoke）**：不是没做，是不做。每个手势都动真光标、把目标
   抬到前台，并留下一张实拍帧——动作在画面上存在，看得见、可核对；代价的另一半是**被遮挡 / 最小化 /
   托盘里的目标只能走应用自己的门，或者拒绝**。
 - **它不替你监视任何东西**：无常驻进程、无屏幕差分轮询、无"变了再叫我"的回调。要等到某件事发生才动手，那件
-  事得有个**接口**（应用自己的 IPC/事件、系统通知、或调用方自己的唤醒通道）；只能靠盯着屏幕看它变才能感知
+  事得有个**接口**（应用自己的 IPC/事件、系统通知、或你自己那边的唤醒通道）；只能靠盯着屏幕看它变才能感知
   的状态，这个工具给不了。
 
 ## 想更深 / 想改它
