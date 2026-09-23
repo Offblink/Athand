@@ -6,15 +6,15 @@
 *Look at a Windows machine's desktop and act on it. One script, a few subcommands, no daemon, no MCP
 server, no package to install.*
 
-仅 Windows。**给 agent 读的说明书是 [`skills/athand/SKILL.md`](skills/athand/SKILL.md)**（流程、
-两条规则、18 条实测坑），那份是权威；本文件是给人看的门面。
+仅 Windows。**给 agent 读的说明书是 [`skills/athand/SKILL.md`](skills/athand/SKILL.md)** —— 把那份
+交给你的 agent，它就知道怎么用；本文件是给人看的。
 
 ## 它解决的是哪件事
 
-屏幕上该点哪个东西 —— 这件事对程序来说一直很难。
+屏幕上该点哪个东西，这件事对程序来说一直很难。
 
-一个窗口里往往有几十个能点的东西：按钮、菜单项、列表行、图标。要知道"那个"在哪儿，得先知道它长什么样；
-要让程序去点，还得给它一个坐标 —— 而模型给的坐标偏 15–68 px（实测，见下），在 18 px 的目标上等于抛硬币。
+一个窗口里往往有几十个能点的东西：按钮、菜单项、列表行、图标。要找到"那个"，模型给的坐标偏 15–68 px
+（实测），在 18 px 的目标上等于抛硬币。
 
 athand 把它变成**选择题**：程序把能点的东西**编号**，调用方只需要说"点 8 号"。
 
@@ -60,8 +60,8 @@ TARGETS in hwnd=0x11009A0 'athand target clicks=0' — pick one by number
 [numbered frame: %TEMP%\athand\targets-0x11009A0-20260923-131743-22e8.png]
 ```
 
-（这段是把仓库里的探针窗口 `probes/target.py` 拉起来、对它跑一次 `targets` 的原样输出：`#5` 以前、
-`#11` 以后的行略掉了，本机的临时目录写成了 `%TEMP%`。中间那列 `cls=Button` 是系统给它的类名。）
+（这是仓库自带的一个测试窗口上的原样输出：`#5` 以前、`#11` 以后的行略掉了，本机临时目录写成了
+`%TEMP%`。`cls=Button` 那一列是系统给它的类名。）
 
 最后两行是这次调用落在盘上的两样东西：一份**清单**（编号、矩形、它的名字），和一张
 **把号码画在截图上的图** —— 图是给人（和视觉模型）看的，清单是给程序用的。
@@ -80,8 +80,7 @@ CLICK #8 [Invoke] '按下' cls=Button rect=(1002, 377, 1182, 416) centre=(1092, 
 `verified`、`unverified`（没验到就不说成功），或者干脆拒绝（正文以 `ERROR:` / `UNDECIDED:` /
 `ESCALATED:` 开头、exit 2，什么都没发出去）。
 
-**去看那张 frame，再决定信不信它。** 这是这个工具的基本立场：每个动作都在画面上真实发生过，
-看得见、可核对。
+**去看那张 frame，再决定信不信它** —— 每个动作都在画面上真实发生过，看得见、可核对。
 
 ## 全部命令
 
@@ -99,7 +98,7 @@ CLICK #8 [Invoke] '按下' cls=Button rect=(1002, 377, 1182, 416) centre=(1092, 
 | `scroll --hwnd N (--target K \| --name 文字 \| --intent 意图)` | 把控件滚进视野 |
 | `restore --hwnd N [--via auto\|window\|shell]` | 把最小化/托盘里的窗口叫回来 |
 | `release` | 松开这台机器上还按着的一切按键与按钮（被 kill 之后用） |
-| `selftest [--keep]` | 拉起探针，逐项对账（`--keep` 留下工作目录） |
+| `selftest` | 装完先跑一次：它拉起自带窗口，把每个手势验一遍，告诉你这台机器上哪些能用 |
 
 退出码：`0` 执行了；`2` 被拒绝（正文以 `ERROR:`、`UNDECIDED:` 或 `ESCALATED:` 开头，什么都没发出去）。
 
@@ -109,8 +108,11 @@ CLICK #8 [Invoke] '按下' cls=Button rect=(1002, 377, 1182, 416) centre=(1092, 
 pip install -r requirements.txt      # pillow, comtypes, numpy, rapidocr-onnxruntime
 ```
 
-`rapidocr-onnxruntime` 那一层是"读自绘界面上的字"（下面会讲什么叫自绘）。它默认装，但代码仍当它可选：
-一个没装它的环境会**少掉 OCR 这一档并说出来**，而不是 import 就崩。
+`rapidocr-onnxruntime` 那一层负责"读自绘界面上的字"（什么叫自绘见下）。它默认装，但代码当它可选：
+没装它的环境会**少掉 OCR 这一档并说出来**，而不是 import 就崩。
+
+装完跑一次 `python skills/athand/athand.py selftest`：18 项全过就说明这台机器上行；跑不了的项会报
+`SKIP` 并说明原因（比如"机器锁着"），不会瞒成通过。
 
 ## 给不出号码的时候：`--intent`
 
@@ -148,7 +150,7 @@ athand 每次请求都带上它。`decider.json` 里有本机路径，所以它*
 python skills/athand/athand.py decider
 ```
 
-## 两条规则
+## 两条规则（用它的时候照这两条走）
 
 1. **触手可及**：屏幕上够得着的东西优先。文件/程序的图标或行在屏幕上，就 `double-click` 它，别去写
    shell 命令。没在运行的窗口用 `restore` 走**应用自己的门**：任务栏按钮 → 托盘图标（含通知区溢出浮窗）
@@ -157,20 +159,20 @@ python skills/athand/athand.py decider
 2. **文件的增删改移不走像素**：那是 shell 的活。像素路径要先解析成矩形，落到错误的一行就是数据事故。
    但把文件**交给某个应用**（输入框、拖放区）不是文件操作，那是 `drag`。
 
-## 为什么是编号，不是坐标
+## 编号的规矩
 
-实测 2026-09-13：模型给的坐标偏 15–68px（18px 的目标上等于抛硬币）；从候选里挑一个编号，3/3 命中。
+每个手势只能报一个**编号**或一个**名字**，位置由程序自己解析 —— 它从无障碍树（Windows 给程序看的那份
+控件清单，也叫 UIA）、OCR、或它从画面里切出来的形状里拿到矩形，再把编号交给你。同一批测试里，
+模型直接给坐标偏 15–68 px，从候选里挑编号 3/3 命中。
 
-所以每个手势只能报一个**编号**或一个**名字**，由程序自己从无障碍树（Windows 给程序看的那份控件清单，
-也叫 UIA）、OCR、或它从画面里切出来的形状里解析出矩形，再把编号交给你。
-
-编号属于**那一次 listing**：`%TEMP%\athand\<hwnd>.json` 连窗口矩形和时间一起写下；窗口动过，后来的调用
-**拒绝**这个编号（"run `targets` again"）。`--name` 不受窗口移动影响（它是对活的无障碍树重新匹配）。
-
-窗口是**自绘**的（Chromium/Electron、Qt 这类，比如微信）时，系统那份控件清单里可能什么都没有，
-图就是工具面：把文字从实拍帧上读出来，按编号挑切出来的形状。OCR 出来的名字是近似的
-（`drag_source.txt` 会读成 `drag_source. txt`），编号不是。要往这种窗口里打字，先点一下输入框，
-再 `type` 不给 `--target` —— 字是跟着焦点走的。
+- **编号属于那一次 listing。** `%TEMP%\athand\<hwnd>.json` 连窗口矩形和时间一起写下；窗口动过，后来的调用
+  **拒绝**这个编号（"run `targets` again"）—— 重跑一次 `targets` 就好。
+- **`--name` 不受窗口移动影响**：它是对活着的控件清单重新匹配，所以同一块界面动过之后，名字还能用。
+  同一个名字有多个控件时，用 `--intent` 让 decider 挑（见上）。
+- **自绘的窗口**（Chromium/Electron、Qt 这类，比如微信）在系统那份控件清单里可能什么都没有。这时图就是
+  工具面：文字是从实拍帧上读出来的，按编号挑切出来的形状。**OCR 出来的名字是近似的**
+  （`drag_source.txt` 会读成 `drag_source. txt`），编号不是。要往这种窗口里打字，先点一下输入框，
+  再 `type` 不给 `--target` —— 字是跟着焦点走的。
 
 ## 它记得什么、不记得什么
 
@@ -190,94 +192,34 @@ python skills/athand/athand.py decider
 - **读它的输出走管道时设 `PYTHONIOENCODING=utf-8`**：脚本自己不选编码，Windows 子进程 stdout 不是控制台时
   按系统代码页写（本机 `gbk`），UTF-8 的读者会看到乱码。
 - **`type` / `key` 要求目标窗口真在前台**，否则拒绝：字和键只跟焦点走，不跟窗口走。
-- **屏幕上的动作一律是真实注入，不走无障碍触发（UIA Invoke）**：不是没做，是不做。每个手势都动真光标、
-  把目标抬到前台，并留下一张实拍帧——动作在画面上存在，看得见、可核对（`type` / `key` 因此要求目标
-  真在前台）。无障碍通道能不留痕迹地"触发"控件，而动作在画面上不存在：原型里有这条路（`pcbridge.py`
-  的 `a11y_invoke`），切出来时故意没带。代价的另一半：被遮挡 / 最小化 / 托盘里的目标只能走应用自己的门，
-  或者拒绝。
+- **动作一律是真实注入，不走无障碍触发（UIA Invoke）**：不是没做，是不做。每个手势都动真光标、把目标
+  抬到前台，并留下一张实拍帧——动作在画面上存在，看得见、可核对；代价的另一半是**被遮挡 / 最小化 /
+  托盘里的目标只能走应用自己的门，或者拒绝**。
 - **它不替你监视任何东西**：无常驻进程、无屏幕差分轮询、无"变了再叫我"的回调。要等到某件事发生才动手，那件
   事得有个**接口**（应用自己的 IPC/事件、系统通知、或调用方自己的唤醒通道）；只能靠盯着屏幕看它变才能感知
-  的状态，这个工具给不了 —— 那是接管系统那一层的题目。
+  的状态，这个工具给不了。
 
-## 怎么自证（改了它之后跑什么）
+## 想更深 / 想改它
 
-这一节说的是**怎么自证**，不是使用的前提：不跑它也能用（`windows → targets → act` 照走，每个动作自己会打印
-`verify:` 和实拍帧）。它是**改动这个工具时的回归账**——仓库里没有 CI、没有单元测试，探针就是唯一的判据，
-改了 `athand.py` 却不跑这几条，等于没验。
+- **[`skills/athand/SKILL.md`](skills/athand/SKILL.md)** —— 给 agent 读的说明书：流程、两条规则、
+  18 条实测坑。想让它替你的 agent 干活，看这份。
+- **[`skills/athand/NOTES.md`](skills/athand/NOTES.md)** —— 要改这个工具时看：自检的三条命令与基线、
+  SKILL.md 这份契约的由来、以及只在改它时才会咬人的坑。
+- **[`COMPARISON.md`](COMPARISON.md)** —— 与另一个同类工具 [cua-driver](https://github.com/trycua/cua)
+  （`trycua/cua` 的桌面驱动层，MIT）的对照实测：同一台机器、同一个任务，两边都做成了，差别在动作怎么发出去、
+  拿什么验收、什么时候拒绝。
+- `skills/athand/probes/` 是自检用的探针（测试窗口），`athand.py` 的注释里会引用 `spec §NN` ——
+  那指的是 [Fungi](https://github.com/CN-Fungi/Fungi) 仓库 `docs/spec.md` 的对应小节。
 
-```bash
-python skills/athand/athand.py selftest [--keep]
-```
+## 背景
 
-它拉起探针（仓库自带的一个测试窗口，`probes/target.py`），逐项对着探针**自己记的账**检查每个手势：
-按钮发出的 `WM_COMMAND`、编辑框报回的 `EM_GETSEL`、OS 给回的窗口矩形、应用自己被点了托盘图标时打的
-`trayclick`。跑不了的检查报 `SKIP` 并打印原因（"机器锁着"、"探针拿不到前台"，就是那两类），绝不瞒成通过。
+`athand.py` 是 [Fungi](https://github.com/CN-Fungi/Fungi) 里的桌控工具，单独切出来发布（代码原样搬过来，
+注释都是当初实测留下的）。它的立场是**不接管系统** —— 不装驱动、不接管输入，只用系统已有的控件清单、
+OCR 和画面去操作**已经在跑的应用**；也**不做被动轮询** —— 没有 daemon、没有"每 N 秒看一眼屏幕"的循环，
+只在你叫它的时候动。
 
-第三条门——桌面图标——单独一个检查，因为它要动你的桌面（建一个快捷方式、必要时 `win d`、然后把窗口还回来）：
-
-```bash
-python skills/athand/probes/desktop_door_check.py     # 约 25 秒，退出时无残留
-```
-
-决策接缝（`--intent`）也有自己的一条，而且**不需要任何模型**：它自带一个每次都答同样的假 decider，
-所以检查的是接缝本身——问到了什么、athand 拿哪个编号去动作、以及每一种"不行"（没配 / 权重不在 /
-没人应答 / 配置坏 / `UNDECIDED` / 回来一个不在选项里的 id）是不是都发生在**注入之前**。真实点击只落在
-它自己拉起的探针窗口上：
-
-```bash
-python skills/athand/probes/decider_check.py          # 约 5 分钟（每个会点击的行都是一次真实扫描+注入）
-```
-
-基线（2026-09-17，Windows 11 26200）：`selftest` **18/18、exit 0、无 SKIP**；
-`desktop_door_check` **6/6、无残留**；锁屏时跑，只读项 6/6、注入项 `SKIP` 并打印原因。
-`decider_check` **28/28、exit 0**（2026-09-23），`selftest` 同日 18/18（改完接缝复跑）。
-真机用例：驱动一个 **Qt 自绘**的聊天客户端（a11y 里什么都没有）——托盘图标把窗口叫回来 → 按 OCR 编号
-点开一个联系人 → 把桌面上的一个文件拖进输入框 → 逐字打 140 个字（0.15 s/字）→ 点发送；每一步都读回
-实拍帧确认。
-
-要改 `athand.py` 的人请先读 [`skills/athand/NOTES.md`](skills/athand/NOTES.md)：18 行判据的逐项名字、
-基线怎么刷新、两条守卫与三条门的实现细节，以及只在改工具时才会咬人的那些坑（`Win+D` 会把探针一起
-最小化、跨进程读 `Edit` 是假的、清理只能按窗口类名……）。
-
-## 布局
-
-```
-skills/athand/
-  SKILL.md      给 agent 的说明书（流程、规则、坑）
-  NOTES.md      改这个工具时的开发/验证笔记（探针、18 行判据、基线、两条守卫、三条门、踩过的坑）
-  athand.py     整个工具：windows targets shot label click double-click drag
-                type key scroll restore decider release selftest
-  probes/
-    target.py               Win32 窗口（Edit / Button / Static / 60 项 ListBox），收到的每条消息都记进
-                            JSONL —— selftest 拿它自己的记录对账 —— 并且能穿上"门"所依赖的形态：
-                            --tool-window（无任务栏按钮）、--tray（通知区图标）、--hidden（不显示窗口）
-    drag_probe.py           SetCapture 路径日志 + EM_GETSEL + WM_DROPFILES
-    canvas_probe2.py        一个 Tk canvas：两个控件画在像素里，a11y 里都没有
-    desktop_door_check.py   第三条门，单跑：桌面上建一个快捷方式 + `win d`
-    decider_check.py        `--intent` 决策接缝，单跑：自带假 decider，不需要模型
-    drag_probe.sample.jsonl, drag_source.txt   一条录下来的拖动路径，和一个用来拖的文件
-```
-
-## 它从哪来
-
-`athand.py` 是 [Fungi](https://github.com/CN-Fungi/Fungi) 的桌控工具，从原来承载它的 agent 里切出来
-（代码是原样搬过来的，注释也是当初一次次实测留下的；设计记录留在 Fungi 的 `docs/spec.md` §35–§46，
-这里注释里的 `spec §NN` 指的就是那份）。
-
-`Screen` 原本是 Fungi 里的一个工具。同一时期另一条路线是把整台电脑接管下来（在容器里起一个 AIOS，从系统层
-控制一切）；这条路走的是反方向 —— **不接管系统，只用既有的无障碍树、OCR 和画面去操作已经在跑的应用**，
-开销小得多。于是它被切出来，成为现在这个样子：一份 skill + 一个脚本。
-
-设计立场是一路带过来的，一句话：**绝不做被动轮询，而是做主动唤醒**。所以这里没有 daemon、没有后台监视、
-没有"每隔 N 秒看一眼屏幕"的循环 —— `athand.py` 只在你叫它的时候动作，且每个动作自带 `verify:` 与实拍帧。
-要监视什么、什么时候叫醒 agent，是调用方（agent 自己，或者将来的系统级接口）的事，不是这个工具的活。
-
-来龙去脉见作者的知乎：[我们用的是同一个 Astra 吗？](https://zhuanlan.zhihu.com/p/2084012946414483140)，
-它在 Fungi 里的样子见 [从 Psi 到 Fungi：Agent 菌丝网络与 AIOS](https://zhuanlan.zhihu.com/p/2079625942096528933)。
-
-和另一个同类工具 **[cua-driver](https://github.com/trycua/cua)（`trycua/cua` 的桌面驱动层，MIT）** 的对照实测
-（同一台机器、同一个任务：逐字输入 / 打开桌面文件 / 托盘唤醒 / 拖文件进微信）记在
-[`COMPARISON.md`](COMPARISON.md) —— 两边都做成了，差别在动作怎么发出去、拿什么验收、什么时候拒绝。
+来龙去脉见作者的知乎：[我们用的是同一个 Astra 吗？](https://zhuanlan.zhihu.com/p/2084012946414483140)、
+[从 Psi 到 Fungi：Agent 菌丝网络与 AIOS](https://zhuanlan.zhihu.com/p/2079625942096528933)。
 
 ## License
 

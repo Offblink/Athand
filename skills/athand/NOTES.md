@@ -18,6 +18,8 @@ python skills/athand/probes/decider_check.py            # ~5min, the --intent se
 Baseline, 2026-09-17 on Windows 11 26200: `selftest` **18/18, exit 0, no SKIP** on two consecutive
 runs; `desktop_door_check` **6/6, exit 0** twice, no leftovers. With the session locked, the
 read-only rows still pass and every injecting row reports `SKIP` with its reason.
+`decider_check` **28/28, exit 0**, and `selftest` 18/18 the same day (2026-09-23, after the
+`--intent` seam was last touched).
 
 - **A check that cannot run is `SKIP`, never a pass.** Two concessions produce that: the input
   desktop is not this session's (`OpenInputDesktop() != "Default"`), or the probe cannot hold the
